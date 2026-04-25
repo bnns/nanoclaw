@@ -1,0 +1,22 @@
+diff --git a/dist/index.js b/dist/index.js
+index 8b490cf67e4d4dcec82404a27ef364f440c617b6..68cd180ba976810560833cf0cce10ce05c85719b 100644
+--- a/dist/index.js
++++ b/dist/index.js
+@@ -798,7 +798,7 @@ var DiscordAdapter = class _DiscordAdapter {
+       (roleId) => this.mentionRoleIds.includes(roleId)
+     );
+     const isMentioned = isUserMentioned || isRoleMentioned;
+-    if (!discordThreadId && isMentioned) {
++    if (false && !discordThreadId && isMentioned) {
+       try {
+         const newThread = await this.createDiscordThread(channelId, data.id);
+         discordThreadId = newThread.id;
+@@ -1789,7 +1789,7 @@ var DiscordAdapter = class _DiscordAdapter {
+       discordThreadId = channelId;
+       parentChannelId = message.channel.parentId;
+     }
+-    if (!discordThreadId && isMentioned) {
++    if (false && !discordThreadId && isMentioned) {
+       try {
+         const newThread = await this.createDiscordThread(channelId, message.id);
+         discordThreadId = newThread.id;
