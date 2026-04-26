@@ -83,6 +83,36 @@ Each NanoClaw group gets its own OneCLI agent identity. This allows different cr
 - Any credentials matching blocked patterns
 - `.env` is shadowed with `/dev/null` in the project root mount
 
+### Local Secrets (Non-Proxiable)
+
+A small number of credentials can't be routed through OneCLI's HTTPS proxy:
+
+- **Local service tokens** (`STP_API_TOKEN`, `HOST_API_TOKEN`) — target `host.docker.internal`, not external HTTPS
+- **AWS-style signing credentials** (`DO_SPACE_KEY`, `DO_SPACE_SECRET`) — use request-level HMAC signing, not header injection
+
+These are stored encrypted at rest (AES-256 GPG, key at `/etc/nanoclaw-secrets.key` with mode 600) in per-group `.secrets.env.gpg` files. Agents decrypt into shell variables at runtime — decrypted values never touch disk.
+
+OneCLI-managed API keys (Pinecone, Cohere, Deepgram, Mistral, Anthropic, etc.) must **not** appear in `.secrets.env.gpg`. The recurring security audit verifies this.
+
+### Automated Security Audit
+
+A cron job (`scripts/security-audit.sh`) runs every 2 days and checks:
+
+| Check | What it catches |
+|-------|-----------------|
+| Disk usage thresholds | Root partition >80%/90%, /tmp bloat, Docker cache growth |
+| Plaintext secret scan | `.secrets.env` without `.gpg`, `.env` files with credentials |
+| OneCLI vault health | Vault reachable, expected secrets present, agent secretMode correct |
+| Leaked key detection | OneCLI-managed keys accidentally in `.secrets.env.gpg` |
+| File permissions | World/group-readable `.gpg`, `.key`, `.env` files |
+| Keyfile integrity | `/etc/nanoclaw-secrets.key` exists with mode 600 |
+| Network services | Listening ports checked against allowlist |
+| SSH auth | Key inventory, failed login count |
+| Docker security | Root-user containers, dangling images |
+| System updates | Pending security patches |
+
+Results log to `logs/audit.log`.
+
 ## Privilege Comparison
 
 | Capability | Main Group | Non-Main Group |
