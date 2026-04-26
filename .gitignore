@@ -11,14 +11,23 @@ store/
 data/
 logs/
 
-# Groups - per-installation state, not tracked
+# Groups - per-installation state, not tracked by upstream.
+# Re-include groups we want to preserve (botdanov).
 groups/*
+!groups/botdanov/
 
 # Composer-managed CLAUDE.md artifacts (regenerated every spawn) and
-# per-group memory (CLAUDE.local.md) must never be committed.
-**/CLAUDE.local.md
+# per-group memory must never be committed.
+groups/*/CLAUDE.md
 **/.claude-shared.md
 **/.claude-fragments/
+
+# Secrets inside groups
+groups/*/.secrets.env.gpg
+
+# Ephemeral analysis / memory (regenerated)
+groups/*/memory/
+groups/*/analysis/
 
 # Secrets
 *.keys.json
@@ -39,3 +48,4 @@ groups/*
 .nanoclaw/
 
 agents-sdk-docs
+.secrets.env
