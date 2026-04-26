@@ -148,7 +148,7 @@ for a in agents:
   # Check for secrets that should NOT be in .secrets.env anymore
   if [ -f /etc/nanoclaw-secrets.key ]; then
     DECRYPTED=$(gpg --batch --yes --quiet --decrypt --passphrase-file /etc/nanoclaw-secrets.key \
-      /home/exedev/nanoclaw/groups/dm-with-bnns/.secrets.env.gpg 2>/dev/null || true)
+      /home/exedev/nanoclaw/groups/botdanov/.secrets.env.gpg 2>/dev/null || true)
     for leaked_var in COHERE_API_KEY DEEPGRAM_API_KEY MISTRAL_API_KEY PINECONE_API_KEY ANTHROPIC_API_KEY; do
       if echo "$DECRYPTED" | grep -q "$leaked_var"; then
         warn "$leaked_var found in .secrets.env.gpg but should be OneCLI-managed only"
