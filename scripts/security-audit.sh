@@ -102,6 +102,65 @@ else
   warn "Keyfile /etc/nanoclaw-secrets.key not found"
 fi
 
+# ── OneCLI Vault ─────────────────────────────────────────────
+log ""
+log "--- OneCLI Vault ---"
+ONECLI_URL="http://172.17.0.1:10254"
+
+# Check OneCLI is reachable
+if curl -gs --max-time 5 "$ONECLI_URL/api/secrets" > /tmp/onecli_secrets.json 2>/dev/null; then
+  log "OneCLI vault reachable"
+
+  # Expected secrets that should be in the vault
+  EXPECTED_SECRETS=("Pinecone" "Cohere" "Deepgram" "Mistral" "Anthropic")
+  VAULT_CONTENTS=$(cat /tmp/onecli_secrets.json)
+
+  for secret_name in "${EXPECTED_SECRETS[@]}"; do
+    if echo "$VAULT_CONTENTS" | python3 -c "import sys,json; secrets=json.load(sys.stdin); sys.exit(0 if any(s['name']=='$secret_name' for s in secrets) else 1)" 2>/dev/null; then
+      log "  ✓ $secret_name present in vault"
+    else
+      warn "$secret_name MISSING from OneCLI vault"
+    fi
+  done
+
+  # Check agent secret mode
+  if curl -gs --max-time 5 "$ONECLI_URL/api/agents" > /tmp/onecli_agents.json 2>/dev/null; then
+    python3 -c "
+import json
+with open('/tmp/onecli_agents.json') as f:
+    agents = json.load(f)
+for a in agents:
+    mode = a.get('secretMode', 'unknown')
+    name = a.get('name', 'unknown')
+    if mode != 'all':
+        print(f'WARN:{name} has secretMode={mode} (should be all)')
+    else:
+        print(f'OK:{name} secretMode=all')
+" 2>/dev/null | while IFS= read -r line; do
+      if [[ "$line" == WARN:* ]]; then
+        warn "${line#WARN:}"
+      else
+        log "  ${line#OK:}"
+      fi
+    done
+  fi
+
+  # Check for secrets that should NOT be in .secrets.env anymore
+  if [ -f /etc/nanoclaw-secrets.key ]; then
+    DECRYPTED=$(gpg --batch --yes --quiet --decrypt --passphrase-file /etc/nanoclaw-secrets.key \
+      /home/exedev/nanoclaw/groups/dm-with-bnns/.secrets.env.gpg 2>/dev/null || true)
+    for leaked_var in COHERE_API_KEY DEEPGRAM_API_KEY MISTRAL_API_KEY PINECONE_API_KEY ANTHROPIC_API_KEY; do
+      if echo "$DECRYPTED" | grep -q "$leaked_var"; then
+        warn "$leaked_var found in .secrets.env.gpg but should be OneCLI-managed only"
+      fi
+    done
+  fi
+
+  rm -f /tmp/onecli_secrets.json /tmp/onecli_agents.json
+else
+  warn "OneCLI vault unreachable at $ONECLI_URL"
+fi
+
 # ── File Permissions ────────────────────────────────────────
 log ""
 log "--- File Permissions ---"
@@ -131,8 +190,12 @@ ss -tlnp 2>/dev/null | grep LISTEN >> "$LOG" 2>&1 || true
 
 # Check for unexpected listeners
 # Known services: 3000=stp-frontend, 4000=strapi, 8000=dev, 9900=host-api,
-# 9999=shelley, 10254+10255=onecli, 5432=postgres, 22=ssh, 35129/43683=node debug
-UNEXPECTED=$(ss -tlnp 2>/dev/null | grep LISTEN | grep -vE ':(3000|4000|8000|9900|9999|10254|10255|5432|22|35129|43683)\b' | grep -v '127.0.0.53' || true)
+# 9999=shelley, 10254+10255=onecli, 5432=postgres, 22=ssh
+# Also ignore 127.0.0.1 high ports (Node debug/inspector, ephemeral)
+UNEXPECTED=$(ss -tlnp 2>/dev/null | grep LISTEN | \
+  grep -vE ':(3000|4000|8000|9900|9999|10254|10255|5432|22)\b' | \
+  grep -vE '127\.0\.0\.1:[3-6][0-9]{4}' | \
+  grep -v '127.0.0.53' || true)
 if [ -n "$UNEXPECTED" ]; then
   warn "Unexpected listening services:"
   echo "$UNEXPECTED" >> "$LOG"
