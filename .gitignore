@@ -11,23 +11,13 @@ store/
 data/
 logs/
 
-# Groups - per-installation state, not tracked by upstream.
-# Re-include groups we want to preserve (botdanov).
+# Groups - per-installation state, not tracked.
+# Agent knowledge bases live in their own repos (mounted via additionalMounts).
 groups/*
-!groups/botdanov/
 
-# Composer-managed CLAUDE.md artifacts (regenerated every spawn) and
-# per-group memory must never be committed.
-groups/*/CLAUDE.md
+# Composer-managed CLAUDE.md artifacts (regenerated every spawn)
 **/.claude-shared.md
 **/.claude-fragments/
-
-# Secrets inside groups
-groups/*/.secrets.env.gpg
-
-# Ephemeral analysis / memory (regenerated)
-groups/*/memory/
-groups/*/analysis/
 
 # Secrets
 *.keys.json
