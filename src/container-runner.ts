@@ -10,6 +10,8 @@ import path from 'path';
 import { OneCLI } from '@onecli-sh/sdk';
 
 import {
+  ANTHROPIC_API_KEY,
+  ANTHROPIC_BASE_URL,
   CONTAINER_IMAGE,
   CONTAINER_IMAGE_BASE,
   CONTAINER_INSTALL_LABEL,
@@ -426,6 +428,14 @@ async function buildContainerArgs(
   // Environment — only vars read by code we don't own.
   // Everything NanoClaw-specific is in container.json (read by runner at startup).
   args.push('-e', `TZ=${TIMEZONE}`);
+
+  // Anthropic API credentials — direct API key or exe.dev HTTP proxy integration.
+  if (ANTHROPIC_API_KEY) {
+    args.push('-e', `ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}`);
+  }
+  if (ANTHROPIC_BASE_URL) {
+    args.push('-e', `ANTHROPIC_BASE_URL=${ANTHROPIC_BASE_URL}`);
+  }
 
   // Provider-contributed env vars (e.g. XDG_DATA_HOME, OPENCODE_*, NO_PROXY).
   if (providerContribution.env) {
