@@ -461,6 +461,30 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
     },
   };
 
+  // Expose fetchRecentMessages if the underlying adapter supports fetchMessages.
+  // Used by post-connect catch-up to fill in messages missed during restart.
+  if (adapter.fetchMessages) {
+    bridge.fetchRecentMessages = async (
+      platformId: string,
+      threadId: string | null,
+      limit = 20,
+      after?: string,
+    ): Promise<InboundMessage[]> => {
+      const tid = threadId ?? platformId;
+      const result = await adapter.fetchMessages(tid, {
+        limit,
+        ...(after ? { cursor: after, direction: 'forward' as const } : {}),
+      });
+      const inbound: InboundMessage[] = [];
+      for (const msg of result.messages) {
+        // Skip bot's own messages
+        if (msg.author && (msg.author as { isMe?: boolean }).isMe) continue;
+        inbound.push(await messageToInbound(msg, msg.isMention === true, true));
+      }
+      return inbound;
+    };
+  }
+
   // Only expose openDM when the underlying Chat SDK adapter implements it.
   // Delegate straight to adapter.openDM rather than going through chat.openDM:
   // the latter dispatches via inferAdapterFromUserId, which only recognizes
