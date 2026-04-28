@@ -138,6 +138,17 @@ export interface ChannelAdapter {
   resolveChannelName?(platformId: string): Promise<string | null>;
 
   /**
+   * Fetch recent messages from a channel/thread. Used by the post-connect
+   * catch-up to fill in messages missed during restart.
+   *
+   * @param after - Platform message ID cursor. Only messages newer than
+   *   this ID are returned. For Discord, snowflake IDs are chronological.
+   *
+   * Adapters that don't support fetching can omit this.
+   */
+  fetchRecentMessages?(platformId: string, threadId: string | null, limit?: number, after?: string): Promise<InboundMessage[]>;
+
+  /**
    * Subscribe the bot to a thread so follow-up messages route via the
    * platform's "subscribed message" path (onSubscribedMessage in Chat SDK).
    * Called by the router when a mention-sticky wiring first engages in a

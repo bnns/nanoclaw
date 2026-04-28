@@ -16,6 +16,7 @@ import { ensureContainerRuntimeRunning, cleanupOrphans } from './container-runti
 import { startActiveDeliveryPoll, startSweepDeliveryPoll, setDeliveryAdapter, stopDeliveryPolls } from './delivery.js';
 import { startHostSweep, stopHostSweep } from './host-sweep.js';
 import { routeInbound } from './router.js';
+import { scheduleCatchUp } from './catchup.js';
 import { log } from './log.js';
 
 // Response + shutdown registries live in response-registry.ts to break the
@@ -176,6 +177,9 @@ async function main(): Promise<void> {
 
   // 7. Start the `ncl` CLI socket server (data/ncl.sock).
   await startCliServer();
+
+  // 8. Schedule post-connect catch-up (fills in messages missed during restart)
+  scheduleCatchUp();
 
   log.info('NanoClaw running');
 }
