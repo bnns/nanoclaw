@@ -431,18 +431,39 @@ function dispatchResultText(text: string, routing: RoutingContext): void {
 }
 
 function sendToDestination(dest: DestinationEntry, body: string, routing: RoutingContext): void {
-  const platformId = dest.type === 'channel' ? dest.platformId! : dest.agentGroupId!;
+  const destPlatformId = dest.type === 'channel' ? dest.platformId! : dest.agentGroupId!;
   const channelType = dest.type === 'channel' ? dest.channelType! : 'agent';
-  // Inherit thread_id from the inbound routing context so replies land in the
-  // same thread the conversation is in. For non-threaded adapters the router
-  // strips thread_id at ingest, so this will already be null.
+
+  // Thread-aware routing: when the session originates from a thread, the
+  // agent's <message to="dest"> typically just means "reply to the
+  // conversation". If the named destination is a different channel than the
+  // one the thread lives in, use the routing context (which points to the
+  // correct thread) instead of the destination's static platform_id.
+  //
+  // Without this, sessions in threads under channels that aren't the agent's
+  // primary destination (e.g. a thread in #indep when the dest is #botdanov)
+  // get misrouted to the wrong channel.
+  let platformId = destPlatformId;
+  let threadId: string | null = null;
+
+  if (platformId === routing.platformId) {
+    // Destination matches the inbound channel — inherit thread context
+    threadId = routing.threadId;
+  } else if (routing.threadId && routing.platformId) {
+    // Session is in a thread under a DIFFERENT channel than the destination.
+    // The agent picked this destination because it's the only named channel,
+    // but the routing context (thread) is the correct reply target.
+    platformId = routing.platformId;
+    threadId = routing.threadId;
+  }
+
   writeMessageOut({
     id: generateId(),
     in_reply_to: routing.inReplyTo,
     kind: 'chat',
     platform_id: platformId,
     channel_type: channelType,
-    thread_id: routing.threadId,
+    thread_id: threadId,
     content: JSON.stringify({ text: body }),
   });
 }
