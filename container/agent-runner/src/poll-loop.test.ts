@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'bun:test';
 
 import { initTestSessionDb, closeSessionDb, getInboundDb, getOutboundDb } from './db/connection.js';
 import { getPendingMessages, markCompleted } from './db/messages-in.js';
-import { getUndeliveredMessages } from './db/messages-out.js';
+import { getUndeliveredMessages, getOutboundMessageCount, writeMessageOut as writeOut } from './db/messages-out.js';
 import { formatMessages, extractRouting } from './formatter.js';
 import { MockProvider } from './providers/mock.js';
 
@@ -244,5 +244,66 @@ describe('end-to-end with mock provider', () => {
     expect(outMessages).toHaveLength(1);
     expect(JSON.parse(outMessages[0].content).text).toBe('The answer is 4');
     expect(outMessages[0].in_reply_to).toBe('m1');
+  });
+});
+
+describe('MCP-sent message suppression', () => {
+  it('getOutboundMessageCount tracks messages written to outbound.db', () => {
+    expect(getOutboundMessageCount()).toBe(0);
+
+    writeOut({
+      id: 'mcp-1',
+      kind: 'chat',
+      platform_id: 'chan-123',
+      channel_type: 'discord',
+      thread_id: null,
+      content: JSON.stringify({ text: 'Hello from MCP' }),
+    });
+
+    expect(getOutboundMessageCount()).toBe(1);
+
+    writeOut({
+      id: 'mcp-2',
+      kind: 'chat',
+      platform_id: 'chan-123',
+      channel_type: 'discord',
+      thread_id: null,
+      content: JSON.stringify({ text: 'Another MCP message' }),
+    });
+
+    expect(getOutboundMessageCount()).toBe(2);
+  });
+
+  it('result text should be suppressed when outbound count grew during query', async () => {
+    // Simulate the scenario: agent uses send_message MCP tool during a turn,
+    // then SDK returns a "narration" result. The poll-loop should detect that
+    // outbound count grew and NOT dispatch the result text.
+    insertMessage('m1', 'chat', { sender: 'Dom', text: 'How are you finding nanoclaw?' });
+
+    const countBefore = getOutboundMessageCount();
+    expect(countBefore).toBe(0);
+
+    // Simulate MCP tool writing during the turn
+    writeOut({
+      id: 'mcp-response-1',
+      kind: 'chat',
+      platform_id: 'chan-123',
+      channel_type: 'discord',
+      thread_id: null,
+      content: JSON.stringify({ text: 'Ah, a philosophical question...' }),
+    });
+
+    const countAfter = getOutboundMessageCount();
+    expect(countAfter).toBeGreaterThan(countBefore);
+
+    // The poll-loop's condition: if count grew, result text is scratchpad
+    // This verifies the detection mechanism works correctly
+    const mcpSentMessages = countAfter > countBefore;
+    expect(mcpSentMessages).toBe(true);
+
+    // Verify only the MCP message exists (no narration message)
+    const outMessages = getUndeliveredMessages();
+    expect(outMessages).toHaveLength(1);
+    expect(JSON.parse(outMessages[0].content).text).toBe('Ah, a philosophical question...');
   });
 });

@@ -131,6 +131,15 @@ export function getRoutingBySeq(
   return outRow ?? null;
 }
 
+/** Count total outbound messages. Used to detect MCP-initiated sends during a turn. */
+export function getOutboundMessageCount(): number {
+  return (
+    getOutboundDb()
+      .prepare('SELECT COUNT(*) AS c FROM messages_out')
+      .get() as { c: number }
+  ).c;
+}
+
 /** Get undelivered messages (for host polling — reads from outbound.db). */
 export function getUndeliveredMessages(): MessageOutRow[] {
   return getOutboundDb()

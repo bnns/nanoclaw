@@ -1,6 +1,6 @@
 import { findByName, getAllDestinations, type DestinationEntry } from './destinations.js';
 import { getPendingMessages, markProcessing, markCompleted, type MessageInRow } from './db/messages-in.js';
-import { writeMessageOut } from './db/messages-out.js';
+import { writeMessageOut, getOutboundMessageCount } from './db/messages-out.js';
 import { touchHeartbeat, clearStaleProcessingAcks } from './db/connection.js';
 import {
   clearContinuation,
@@ -158,6 +158,11 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
     // provider natively handles slash commands), others get XML.
     const prompt = formatMessagesWithCommands(keep, config.provider.supportsNativeSlashCommands);
 
+    // Snapshot outbound count before the query — MCP tools (send_message)
+    // may write to messages_out during the turn. If the count grows, the
+    // agent already spoke via tools and the SDK result text is narration.
+    const outboundCountBefore = getOutboundMessageCount();
+
     log(`Processing ${keep.length} message(s), kinds: ${[...new Set(keep.map((m) => m.kind))].join(',')}`);
 
     const query = config.provider.query({
@@ -171,7 +176,7 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
     const skippedSet = new Set(skipped);
     const processingIds = ids.filter((id) => !commandIds.includes(id) && !skippedSet.has(id));
     try {
-      const result = await processQuery(query, routing, processingIds, config.providerName);
+      const result = await processQuery(query, routing, processingIds, config.providerName, outboundCountBefore);
       if (result.continuation && result.continuation !== continuation) {
         continuation = result.continuation;
         setContinuation(config.providerName, continuation);
@@ -250,6 +255,7 @@ async function processQuery(
   routing: RoutingContext,
   initialBatchIds: string[],
   providerName: string,
+  outboundCountBefore: number,
 ): Promise<QueryResult> {
   let queryContinuation: string | undefined;
   let done = false;
@@ -310,7 +316,16 @@ async function processQuery(
         // at all — either way the turn is finished.
         markCompleted(initialBatchIds);
         if (event.text) {
-          dispatchResultText(event.text, routing);
+          // If MCP tools (send_message) already wrote outbound messages
+          // during this turn, the SDK result text is internal narration
+          // ("Response sent. I stayed in character..."), not a reply
+          // for the user. Treat it as scratchpad only.
+          const outboundCountNow = getOutboundMessageCount();
+          if (outboundCountNow > outboundCountBefore) {
+            log(`[scratchpad/mcp-sent] ${event.text.slice(0, 500)}${event.text.length > 500 ? '\u2026' : ''}`);
+          } else {
+            dispatchResultText(event.text, routing);
+          }
         }
       }
     }
