@@ -201,6 +201,33 @@ if [ -n "$UNEXPECTED" ]; then
   echo "$UNEXPECTED" >> "$LOG"
 fi
 
+# ── Session DB Size ─────────────────────────────────────────
+log ""
+log "--- Session DB Size ---"
+SESSION_DIR="/home/exedev/nanoclaw/data/v2-sessions"
+if [ -d "$SESSION_DIR" ]; then
+  SESS_SIZE_MB=$(du -sm "$SESSION_DIR" 2>/dev/null | awk '{print $1}')
+  log "Session DBs total: ${SESS_SIZE_MB}MB"
+
+  if [ "$SESS_SIZE_MB" -ge 2000 ]; then
+    warn "Session DBs at ${SESS_SIZE_MB}MB — pruning old messages recommended"
+    log "  To prune: find sessions with large inbound.db, delete messages_in rows"
+    log "  older than 90 days, then VACUUM. Same for outbound.db/messages_out."
+    log "  Example:"
+    log "    sqlite3 <path>/inbound.db \"DELETE FROM messages_in WHERE timestamp < datetime('now', '-90 days'); VACUUM;\""
+  elif [ "$SESS_SIZE_MB" -ge 1000 ]; then
+    warn "Session DBs at ${SESS_SIZE_MB}MB — monitor growth"
+  else
+    log "Session DB size OK (under 1GB)"
+  fi
+
+  # Largest individual session DBs
+  log "Top 5 largest session DBs:"
+  find "$SESSION_DIR" -name '*.db' -exec du -sm {} \; 2>/dev/null | sort -rn | head -5 >> "$LOG" 2>&1 || true
+else
+  log "Session directory not found: $SESSION_DIR"
+fi
+
 # ── SSH & Auth ──────────────────────────────────────────────
 log ""
 log "--- Authentication ---"
