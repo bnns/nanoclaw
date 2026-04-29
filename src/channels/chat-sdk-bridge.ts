@@ -127,6 +127,19 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
   let setupConfig: ChannelSetup;
   let gatewayAbort: AbortController | null = null;
 
+  /**
+   * Inject the thread name into the message content so the agent knows
+   * which thread/topic it's in. Thread names on Discord are the thread title
+   * (e.g. "27 Oct - Getting to the heart of the Beast: ...").
+   */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  function injectThreadName(inbound: InboundMessage, thread: any): void {
+    const threadName = thread?.rootMessage?.text;
+    if (threadName && typeof inbound.content === 'object' && inbound.content !== null) {
+      (inbound.content as Record<string, unknown>).threadName = threadName;
+    }
+  }
+
   async function messageToInbound(
     message: ChatMessage,
     isMention: boolean,
@@ -222,17 +235,17 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
       // wirings still fire on in-thread mentions.
       chat.onSubscribedMessage(async (thread, message) => {
         const channelId = adapter.channelIdFromThreadId(thread.id);
-        await setupConfig.onInbound(
-          channelId,
-          thread.id,
-          await messageToInbound(message, message.isMention === true, true),
-        );
+        const inbound = await messageToInbound(message, message.isMention === true, true);
+        injectThreadName(inbound, thread);
+        await setupConfig.onInbound(channelId, thread.id, inbound);
       });
 
       // @mention in an unsubscribed thread — SDK-confirmed bot mention.
       chat.onNewMention(async (thread, message) => {
         const channelId = adapter.channelIdFromThreadId(thread.id);
-        await setupConfig.onInbound(channelId, thread.id, await messageToInbound(message, true, true));
+        const inbound = await messageToInbound(message, true, true);
+        injectThreadName(inbound, thread);
+        await setupConfig.onInbound(channelId, thread.id, inbound);
       });
 
       // DMs — by definition addressed to the bot. Thread id flows through
