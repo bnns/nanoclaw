@@ -316,15 +316,26 @@ async function processQuery(
         // at all — either way the turn is finished.
         markCompleted(initialBatchIds);
         if (event.text) {
-          // If MCP tools (send_message) already wrote outbound messages
-          // during this turn, the SDK result text is internal narration
-          // ("Response sent. I stayed in character..."), not a reply
-          // for the user. Treat it as scratchpad only.
+          // The narration-suppression heuristic: if MCP tools (send_message)
+          // already wrote a TEXT outbound mid-turn, the SDK's final result
+          // text is usually internal narration ("Response sent. I stayed in
+          // character...") and shouldn't be re-dispatched.
+          //
+          // Two carve-outs prevent over-suppression:
+          //   1. Reactions/edits/operations don't count as the "reply" — only
+          //      text sends do. (getOutboundTextSendCount filters by content
+          //      shape, see messages-out.ts.)
+          //   2. If the result text contains <message to="..."> blocks, the
+          //      agent intentionally wrapped them as final delivery (multi-
+          //      destination pattern). Always dispatch those, regardless of
+          //      mid-turn activity — a mid-turn ack ("On it…") is not the
+          //      same as the wrapped final reply.
           const outboundCountNow = getOutboundTextSendCount();
-          if (outboundCountNow > outboundCountBefore) {
-            log(`[scratchpad/mcp-sent] ${event.text.slice(0, 500)}${event.text.length > 500 ? '\u2026' : ''}`);
-          } else {
+          const hasMessageBlocks = /<message\s+to="[^"]+"\s*>/.test(event.text);
+          if (hasMessageBlocks || outboundCountNow === outboundCountBefore) {
             dispatchResultText(event.text, routing);
+          } else {
+            log(`[scratchpad/mcp-sent] ${event.text.slice(0, 500)}${event.text.length > 500 ? '\u2026' : ''}`);
           }
         }
       }
