@@ -78,16 +78,29 @@ function resolveRouting(
   const dest = findByName(to);
   if (!dest) return { error: `Unknown destination "${to}". Known: ${destinationList()}` };
   if (dest.type === 'channel') {
-    // If the destination is the same channel the session is bound to,
-    // preserve the thread_id so replies land in the correct thread.
+    // Thread-aware routing: when the session originates from a thread,
+    // the agent picking a named destination typically just means "reply
+    // to the conversation". If the destination is the same channel,
+    // inherit the thread_id. If it's a DIFFERENT channel but the session
+    // is thread-bound, redirect to the session's thread instead of
+    // sending to the wrong channel.
     const session = getSessionRouting();
-    const threadId =
-      session.channel_type === dest.channelType && session.platform_id === dest.platformId
-        ? session.thread_id
-        : null;
+    let resolvedPlatformId = dest.platformId!;
+    let threadId: string | null = null;
+
+    if (session.channel_type === dest.channelType && session.platform_id === dest.platformId) {
+      // Destination matches session channel — inherit thread
+      threadId = session.thread_id;
+    } else if (session.thread_id && session.platform_id) {
+      // Session is in a thread under a DIFFERENT channel than the destination.
+      // Redirect to the session's thread — the agent doesn't have a destination
+      // for the thread's parent channel, so it picked the only channel it knows.
+      resolvedPlatformId = session.platform_id;
+      threadId = session.thread_id;
+    }
     return {
       channel_type: dest.channelType!,
-      platform_id: dest.platformId!,
+      platform_id: resolvedPlatformId,
       thread_id: threadId,
       resolvedName: to,
     };
