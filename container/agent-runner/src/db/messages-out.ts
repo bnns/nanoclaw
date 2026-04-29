@@ -140,6 +140,22 @@ export function getOutboundMessageCount(): number {
   ).c;
 }
 
+/** Count outbound chat sends that carry user-visible text (excludes reactions,
+ * edits, and other operations). The result-text heuristic uses this: only a
+ * real text send mid-turn turns the SDK's final result into post-send
+ * narration; a reaction alone does not. */
+export function getOutboundTextSendCount(): number {
+  return (
+    getOutboundDb()
+      .prepare(
+        `SELECT COUNT(*) AS c FROM messages_out
+         WHERE kind = 'chat'
+           AND content NOT LIKE '%"operation":%'`,
+      )
+      .get() as { c: number }
+  ).c;
+}
+
 /** Get undelivered messages (for host polling — reads from outbound.db). */
 export function getUndeliveredMessages(): MessageOutRow[] {
   return getOutboundDb()

@@ -1,6 +1,6 @@
 import { findByName, getAllDestinations, type DestinationEntry } from './destinations.js';
 import { getPendingMessages, markProcessing, markCompleted, type MessageInRow } from './db/messages-in.js';
-import { writeMessageOut, getOutboundMessageCount } from './db/messages-out.js';
+import { writeMessageOut, getOutboundMessageCount, getOutboundTextSendCount } from './db/messages-out.js';
 import { touchHeartbeat, clearStaleProcessingAcks } from './db/connection.js';
 import {
   clearContinuation,
@@ -161,7 +161,7 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
     // Snapshot outbound count before the query — MCP tools (send_message)
     // may write to messages_out during the turn. If the count grows, the
     // agent already spoke via tools and the SDK result text is narration.
-    const outboundCountBefore = getOutboundMessageCount();
+    const outboundCountBefore = getOutboundTextSendCount();
 
     log(`Processing ${keep.length} message(s), kinds: ${[...new Set(keep.map((m) => m.kind))].join(',')}`);
 
@@ -320,7 +320,7 @@ async function processQuery(
           // during this turn, the SDK result text is internal narration
           // ("Response sent. I stayed in character..."), not a reply
           // for the user. Treat it as scratchpad only.
-          const outboundCountNow = getOutboundMessageCount();
+          const outboundCountNow = getOutboundTextSendCount();
           if (outboundCountNow > outboundCountBefore) {
             log(`[scratchpad/mcp-sent] ${event.text.slice(0, 500)}${event.text.length > 500 ? '\u2026' : ''}`);
           } else {
