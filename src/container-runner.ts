@@ -17,6 +17,7 @@ import {
   CONTAINER_INSTALL_LABEL,
   DATA_DIR,
   GROUPS_DIR,
+  MAX_CONCURRENT_CONTAINERS,
   ONECLI_API_KEY,
   ONECLI_URL,
   TIMEZONE,
@@ -62,8 +63,25 @@ const activeContainers = new Map<string, { process: ChildProcess; containerName:
  */
 const wakePromises = new Map<string, Promise<void>>();
 
+/**
+ * Wake queue: sessions waiting for a container slot. Keyed by session id
+ * to deduplicate. Each entry holds the session + a promise pair so the
+ * original caller can await the eventual spawn.
+ */
+interface QueuedWake {
+  session: Session;
+  resolve: () => void;
+  reject: (err: Error) => void;
+  promise: Promise<void>;
+}
+const wakeQueue = new Map<string, QueuedWake>();
+
 export function getActiveContainerCount(): number {
   return activeContainers.size;
+}
+
+export function getQueuedWakeCount(): number {
+  return wakeQueue.size;
 }
 
 export function isContainerRunning(sessionId: string): boolean {
@@ -71,10 +89,10 @@ export function isContainerRunning(sessionId: string): boolean {
 }
 
 /**
- * Wake up a container for a session. If already running or mid-spawn, no-op
- * (the in-flight wake promise is reused).
- *
- * The container runs the v2 agent-runner which polls the session DB.
+ * Wake up a container for a session. If already running or mid-spawn, no-op.
+ * If at the concurrency limit, the session is queued and will be spawned
+ * when a slot opens. The returned promise resolves when the container
+ * actually starts (not when it's queued).
  */
 export function wakeContainer(session: Session): Promise<void> {
   if (activeContainers.has(session.id)) {
@@ -86,11 +104,69 @@ export function wakeContainer(session: Session): Promise<void> {
     log.debug('Container wake already in-flight — joining existing promise', { sessionId: session.id });
     return existing;
   }
+
+  // Check concurrency limit
+  const inflight = activeContainers.size + wakePromises.size;
+  if (inflight >= MAX_CONCURRENT_CONTAINERS) {
+    // Already queued? Return existing promise.
+    const queued = wakeQueue.get(session.id);
+    if (queued) return queued.promise;
+
+    // Enqueue and return a promise that resolves when eventually spawned.
+    let resolve!: () => void;
+    let reject!: (err: Error) => void;
+    const promise = new Promise<void>((res, rej) => { resolve = res; reject = rej; });
+    wakeQueue.set(session.id, { session, resolve, reject, promise });
+    log.info('Container wake queued (concurrency limit)', {
+      sessionId: session.id,
+      active: activeContainers.size,
+      inflight: wakePromises.size,
+      queued: wakeQueue.size,
+      limit: MAX_CONCURRENT_CONTAINERS,
+    });
+    return promise;
+  }
+
+  return spawnNow(session);
+}
+
+/** Spawn immediately, tracking the in-flight promise. */
+function spawnNow(session: Session): Promise<void> {
   const promise = spawnContainer(session).finally(() => {
     wakePromises.delete(session.id);
+    drainQueue();
   });
   wakePromises.set(session.id, promise);
   return promise;
+}
+
+/**
+ * Drain the wake queue: spawn queued sessions up to the concurrency limit.
+ * Called whenever a container exits or a spawn completes.
+ */
+function drainQueue(): void {
+  while (wakeQueue.size > 0) {
+    const inflight = activeContainers.size + wakePromises.size;
+    if (inflight >= MAX_CONCURRENT_CONTAINERS) break;
+
+    // FIFO: Map iteration order is insertion order
+    const [sessionId, entry] = wakeQueue.entries().next().value as [string, QueuedWake];
+    wakeQueue.delete(sessionId);
+
+    // Session may have been handled while queued (e.g. container started by sweep)
+    if (activeContainers.has(sessionId) || wakePromises.has(sessionId)) {
+      entry.resolve();
+      continue;
+    }
+
+    log.info('Dequeuing container wake', {
+      sessionId,
+      active: activeContainers.size,
+      queued: wakeQueue.size,
+    });
+
+    spawnNow(entry.session).then(entry.resolve, entry.reject);
+  }
 }
 
 async function spawnContainer(session: Session): Promise<void> {
@@ -170,6 +246,7 @@ async function spawnContainer(session: Session): Promise<void> {
     markContainerStopped(session.id);
     stopTypingRefresh(session.id);
     log.info('Container exited', { sessionId: session.id, code, containerName });
+    drainQueue();
   });
 
   container.on('error', (err) => {
@@ -177,6 +254,7 @@ async function spawnContainer(session: Session): Promise<void> {
     markContainerStopped(session.id);
     stopTypingRefresh(session.id);
     log.error('Container spawn error', { sessionId: session.id, err });
+    drainQueue();
   });
 }
 
