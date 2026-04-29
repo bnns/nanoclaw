@@ -80,8 +80,13 @@ export function writeMessageOut(msg: WriteMessageOut): number {
  * Look up a message's platform ID by seq number.
  * Searches both inbound and outbound DBs since seq spans both.
  *
- * For inbound messages, the Chat SDK message ID is already the platform message ID
- * (e.g., "6037840640:42" for Telegram).
+ * For inbound messages, the chat-sdk-native id lives inside the content JSON
+ * (e.g. Discord snowflake "1499157370188599346", Telegram "6037840640:42").
+ * The row's `id` column is `<chat-sdk-id>:<agent_group_id>` — namespaced by
+ * the router (router.ts: messageIdForAgent) so multiple agent groups routed
+ * from the same upstream message keep distinct rows. Platform APIs reject
+ * the namespaced form, so reactions/edits must use the un-namespaced id
+ * from content.
  *
  * For outbound messages, the internal ID (msg-xxx) won't work for edits/reactions.
  * Instead, look up the platform_message_id from the delivered table (host writes this
@@ -90,11 +95,19 @@ export function writeMessageOut(msg: WriteMessageOut): number {
 export function getMessageIdBySeq(seq: number): string | null {
   const inbound = getInboundDb();
 
-  // Inbound messages: ID is already the platform message ID
-  const inRow = inbound.prepare('SELECT id FROM messages_in WHERE seq = ?').get(seq) as
-    | { id: string }
+  // Inbound messages: parse content JSON for the chat-sdk-native id.
+  const inRow = inbound.prepare('SELECT content FROM messages_in WHERE seq = ?').get(seq) as
+    | { content: string }
     | undefined;
-  if (inRow) return inRow.id;
+  if (inRow) {
+    try {
+      const parsed = JSON.parse(inRow.content) as { id?: unknown };
+      if (typeof parsed.id === 'string' && parsed.id.length > 0) return parsed.id;
+    } catch {
+      // Malformed content — fall through to return null below.
+    }
+    return null;
+  }
 
   // Outbound messages: look up platform message ID from delivered table
   const outRow = getOutboundDb().prepare('SELECT id FROM messages_out WHERE seq = ?').get(seq) as
