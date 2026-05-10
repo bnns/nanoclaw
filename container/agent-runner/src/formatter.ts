@@ -124,7 +124,11 @@ export function extractRouting(messages: MessageInRow[]): RoutingContext {
  * (src/v1/router.ts:20-22); dropping it led to misinterpretations where the
  * agent scheduled tasks for the wrong hour.
  *
- * Strips routing fields — the agent never sees platform_id, channel_type, thread_id.
+ * Strips per-message routing fields (platform_id, channel_type, thread_id are
+ * not exposed on each <message>). The session-wide thread_id is included once
+ * on the <context> header so the agent can call host APIs (e.g.
+ * /discord/thread/<id>) when a fresh-wake prompt lacks the antecedent for a
+ * follow-up.
  */
 export function formatMessages(messages: MessageInRow[]): string {
   // Extract thread name from the first message that has one
@@ -136,7 +140,9 @@ export function formatMessages(messages: MessageInRow[]): string {
     } catch { return null; }
   }, null);
   const threadAttr = threadName ? ` thread="${escapeXml(threadName)}"` : '';
-  const header = `<context timezone="${escapeXml(TIMEZONE)}"${threadAttr} />\n`;
+  const threadIdSource = messages.find((m) => m.thread_id)?.thread_id ?? null;
+  const threadIdAttr = threadIdSource ? ` thread_id="${escapeXml(threadIdSource)}"` : '';
+  const header = `<context timezone="${escapeXml(TIMEZONE)}"${threadAttr}${threadIdAttr} />\n`;
   if (messages.length === 0) return header;
 
   // Group by kind
