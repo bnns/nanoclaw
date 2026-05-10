@@ -14,6 +14,12 @@ logs/
 # Groups - per-installation state, not tracked.
 # Agent knowledge bases live in their own repos (mounted via additionalMounts).
 groups/*
+# Exception: Botdanov's container.json is canonical deploy config (mounts,
+# group id) and survives rebases when tracked. Persona/memory/state remain
+# ignored — knowledge base is in the botdanov repo, not here.
+!groups/botdanov/
+groups/botdanov/*
+!groups/botdanov/container.json
 
 # Composer-managed CLAUDE.md artifacts (regenerated every spawn)
 **/.claude-shared.md

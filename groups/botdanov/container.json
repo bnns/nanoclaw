@@ -1,0 +1,12 @@
+{
+  "mcpServers": {},
+  "packages": {
+    "apt": [],
+    "npm": []
+  },
+  "additionalMounts": [],
+  "skills": "all",
+  "groupName": "Botdanov",
+  "assistantName": "Botdanov",
+  "agentGroupId": "ag-1777143545039-p4uskb"
+}
