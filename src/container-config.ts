@@ -43,6 +43,15 @@ export interface ContainerConfig {
   maxMessagesPerPrompt?: number;
   model?: string;
   effort?: string;
+  /** When true, clear the SDK continuation key before each wake so each
+   * Discord message starts a fresh Claude conversation instead of --resuming
+   * the prior transcript. Trades inter-message context for lower per-message
+   * cost on long-running sessions.
+   *
+   * NOTE (post-rebase 2026-05-10): not yet persisted via container_configs
+   * table; configFromDb() does not populate it. The runtime hook in
+   * container-runner.ts is dormant until a DB migration adds the column. */
+  freshSessionPerMessage?: boolean;
 }
 
 /** Build a `ContainerConfig` from a DB row + agent group identity. */
