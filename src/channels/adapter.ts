@@ -145,7 +145,12 @@ export interface ChannelAdapter {
    *
    * Adapters that don't support fetching can omit this.
    */
-  fetchRecentMessages?(platformId: string, threadId: string | null, limit?: number, after?: string): Promise<InboundMessage[]>;
+  fetchRecentMessages?(
+    platformId: string,
+    threadId: string | null,
+    limit?: number,
+    after?: string,
+  ): Promise<InboundMessage[]>;
 
   /**
    * Subscribe the bot to a thread so follow-up messages route via the

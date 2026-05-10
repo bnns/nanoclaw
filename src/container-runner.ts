@@ -6,6 +6,7 @@
 import { ChildProcess, execSync, spawn } from 'child_process';
 import fs from 'fs';
 import path from 'path';
+import Database from 'better-sqlite3';
 
 import { OneCLI } from '@onecli-sh/sdk';
 
@@ -45,6 +46,7 @@ import {
   markContainerStopped,
   sessionDir,
   writeSessionRouting,
+  outboundDbPath,
 } from './session-manager.js';
 import type { AgentGroup, Session } from './types.js';
 
@@ -115,7 +117,10 @@ export function wakeContainer(session: Session): Promise<void> {
     // Enqueue and return a promise that resolves when eventually spawned.
     let resolve!: () => void;
     let reject!: (err: Error) => void;
-    const promise = new Promise<void>((res, rej) => { resolve = res; reject = rej; });
+    const promise = new Promise<void>((res, rej) => {
+      resolve = res;
+      reject = rej;
+    });
     wakeQueue.set(session.id, { session, resolve, reject, promise });
     log.info('Container wake queued (concurrency limit)', {
       sessionId: session.id,
@@ -188,6 +193,20 @@ async function spawnContainer(session: Session): Promise<void> {
   // Read container config once — threaded through provider resolution,
   // buildMounts, and buildContainerArgs so we don't re-read the file.
   const containerConfig = readContainerConfig(agentGroup.folder);
+
+  /* fresh-session-per-message hook */
+  if (containerConfig.freshSessionPerMessage) {
+    const outDb = new Database(outboundDbPath(agentGroup.id, session.id));
+    try {
+      outDb.prepare('DELETE FROM session_state WHERE key = ?').run('continuation:claude');
+      log.info('Cleared SDK continuation (freshSessionPerMessage=true)', {
+        sessionId: session.id,
+        agentGroup: agentGroup.name,
+      });
+    } finally {
+      outDb.close();
+    }
+  }
 
   // Ensure container.json has the agent group identity fields the runner needs.
   // Written at spawn time so the runner can read them from the RO mount.

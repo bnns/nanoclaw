@@ -343,6 +343,12 @@ function evaluateEngage(
   mg: MessagingGroup,
   threadId: string | null,
 ): boolean {
+  // Bang-prefixed commands always engage regardless of engage_mode, so
+  // users can invoke !website / !approve without @-mentioning the bot.
+  // The agent's guide is responsible for sender-restriction logic.
+  if (/^!(website|approve)(\s|$)/i.test(text.trim())) {
+    return true;
+  }
   switch (agent.engage_mode) {
     case 'pattern': {
       const pat = agent.engage_pattern ?? '.';

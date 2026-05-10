@@ -47,6 +47,11 @@ export interface ContainerConfig {
   agentGroupId?: string;
   /** Max messages per prompt. Falls back to code default if unset. */
   maxMessagesPerPrompt?: number;
+  /** When true, clear the SDK continuation key before each wake so each
+   * Discord message starts a fresh Claude conversation instead of --resuming
+   * the prior transcript. Trades inter-message context for lower per-message
+   * cost on long-running sessions. */
+  freshSessionPerMessage?: boolean;
 }
 
 function emptyConfig(): ContainerConfig {
@@ -87,6 +92,7 @@ export function readContainerConfig(folder: string): ContainerConfig {
       assistantName: raw.assistantName,
       agentGroupId: raw.agentGroupId,
       maxMessagesPerPrompt: raw.maxMessagesPerPrompt,
+      freshSessionPerMessage: raw.freshSessionPerMessage ?? false,
     };
   } catch (err) {
     console.error(`[container-config] failed to parse ${p}: ${String(err)}`);
