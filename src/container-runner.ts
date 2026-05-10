@@ -6,7 +6,6 @@
 import { ChildProcess, execSync, spawn } from 'child_process';
 import fs from 'fs';
 import path from 'path';
-import Database from 'better-sqlite3';
 
 import { OneCLI } from '@onecli-sh/sdk';
 
@@ -47,7 +46,6 @@ import {
   markContainerStopped,
   sessionDir,
   writeSessionRouting,
-  outboundDbPath,
 } from './session-manager.js';
 import type { AgentGroup, Session } from './types.js';
 
@@ -129,20 +127,6 @@ async function spawnContainer(session: Session): Promise<void> {
   // the config object, threaded through provider resolution, buildMounts,
   // and buildContainerArgs so we don't re-read.
   const containerConfig = materializeContainerJson(agentGroup.id);
-
-  /* fresh-session-per-message hook */
-  if (containerConfig.freshSessionPerMessage) {
-    const outDb = new Database(outboundDbPath(agentGroup.id, session.id));
-    try {
-      outDb.prepare('DELETE FROM session_state WHERE key = ?').run('continuation:claude');
-      log.info('Cleared SDK continuation (freshSessionPerMessage=true)', {
-        sessionId: session.id,
-        agentGroup: agentGroup.name,
-      });
-    } finally {
-      outDb.close();
-    }
-  }
 
   // Resolve the effective provider + any host-side contribution it declares
   // (extra mounts, env passthrough). Computed once and threaded through both
