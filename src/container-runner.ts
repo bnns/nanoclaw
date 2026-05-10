@@ -6,6 +6,7 @@
 import { ChildProcess, execSync, spawn } from 'child_process';
 import fs from 'fs';
 import path from 'path';
+import Database from 'better-sqlite3';
 
 import { OneCLI } from '@onecli-sh/sdk';
 
@@ -46,6 +47,7 @@ import {
   markContainerStopped,
   sessionDir,
   writeSessionRouting,
+  outboundDbPath,
 } from './session-manager.js';
 import type { AgentGroup, Session } from './types.js';
 
@@ -127,6 +129,26 @@ async function spawnContainer(session: Session): Promise<void> {
   // the config object, threaded through provider resolution, buildMounts,
   // and buildContainerArgs so we don't re-read.
   const containerConfig = materializeContainerJson(agentGroup.id);
+
+  // Botdanov fresh-session policy (A1: pure on-demand thread context):
+  // clear the SDK continuation key before each wake so the agent starts
+  // each Discord message in a fresh Claude session. Paired with the
+  // "Thread context" instruction in CLAUDE.local.md which tells the
+  // agent to fetch past messages from /workspace/inbound.db (or via the
+  // host-api thread-fetch endpoint) only when the current request needs
+  // them. Avoids replaying accumulating thread context on every wake.
+  if (agentGroup.name === 'Botdanov') {
+    const outDb = new Database(outboundDbPath(agentGroup.id, session.id));
+    try {
+      outDb.prepare('DELETE FROM session_state WHERE key = ?').run('continuation:claude');
+      log.info('Cleared SDK continuation (Botdanov fresh-session policy)', {
+        sessionId: session.id,
+        agentGroup: agentGroup.name,
+      });
+    } finally {
+      outDb.close();
+    }
+  }
 
   // Resolve the effective provider + any host-side contribution it declares
   // (extra mounts, env passthrough). Computed once and threaded through both
