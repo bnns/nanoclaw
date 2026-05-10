@@ -11,7 +11,6 @@ import Database from 'better-sqlite3';
 import { OneCLI } from '@onecli-sh/sdk';
 
 import {
-  ANTHROPIC_API_KEY,
   ANTHROPIC_BASE_URL,
   CONTAINER_IMAGE,
   CONTAINER_IMAGE_BASE,
@@ -435,11 +434,12 @@ async function buildContainerArgs(
   // Everything NanoClaw-specific is in container.json (read by runner at startup).
   args.push('-e', `TZ=${TIMEZONE}`);
 
-  // Anthropic API credentials — direct API key or exe.dev HTTP proxy integration.
-  if (ANTHROPIC_API_KEY) {
-    args.push('-e', `ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}`);
-  }
+  // Anthropic routing — the proxy at ANTHROPIC_BASE_URL injects real auth
+  // at the edge, but the SDK still requires a non-empty ANTHROPIC_API_KEY
+  // at construction. Pass a literal placeholder rather than a stub in .env
+  // so no real-shaped key appears on the host filesystem.
   if (ANTHROPIC_BASE_URL) {
+    args.push('-e', 'ANTHROPIC_API_KEY=sk-proxy-stub-no-real-auth');
     args.push('-e', `ANTHROPIC_BASE_URL=${ANTHROPIC_BASE_URL}`);
   }
 
@@ -466,7 +466,10 @@ async function buildContainerArgs(
     if (onecliApplied) {
       log.info('OneCLI gateway applied', { containerName });
     } else {
-      log.warn('OneCLI gateway not applied — container will have no OneCLI-injected credentials (exe.dev proxies still work)', { containerName });
+      log.warn(
+        'OneCLI gateway not applied — container will have no OneCLI-injected credentials (exe.dev proxies still work)',
+        { containerName },
+      );
     }
   } catch (err) {
     log.warn('OneCLI gateway error — container will spawn without OneCLI credentials (exe.dev proxies still work)', {
