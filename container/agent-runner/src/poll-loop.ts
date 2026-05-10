@@ -476,20 +476,34 @@ function dispatchResultText(text: string, routing: RoutingContext): void {
 }
 
 function sendToDestination(dest: DestinationEntry, body: string, routing: RoutingContext): void {
-  const platformId = dest.type === 'channel' ? dest.platformId! : dest.agentGroupId!;
+  let platformId = dest.type === 'channel' ? dest.platformId! : dest.agentGroupId!;
   const channelType = dest.type === 'channel' ? dest.channelType! : 'agent';
   // Resolve thread_id per-destination from the most recent inbound message
   // that came from this same channel+platform. In agent-shared sessions,
   // different destinations have different thread contexts — using a single
   // routing.threadId would stamp one channel's thread onto another.
   const destRouting = resolveDestinationThread(channelType, platformId);
+  let threadId: string | null = destRouting?.threadId ?? null;
+  let inReplyTo: string | null = destRouting?.inReplyTo ?? routing.inReplyTo;
+
+  // Botdanov-deploy fallback (ported from b9b4683): if no inbound history
+  // matches this destination's static platform_id (e.g. destination is a DM
+  // address but the conversation is actually in a channel/thread), use the
+  // current routing context's platform/thread. Without this, replies misroute
+  // to the destination's static address instead of where the user wrote.
+  if (!destRouting && routing.threadId && routing.platformId) {
+    platformId = routing.platformId;
+    threadId = routing.threadId;
+    inReplyTo = routing.inReplyTo;
+  }
+
   writeMessageOut({
     id: generateId(),
-    in_reply_to: destRouting?.inReplyTo ?? routing.inReplyTo,
+    in_reply_to: inReplyTo,
     kind: 'chat',
     platform_id: platformId,
     channel_type: channelType,
-    thread_id: destRouting?.threadId ?? null,
+    thread_id: threadId,
     content: JSON.stringify({ text: body }),
   });
 }
