@@ -451,18 +451,29 @@ async function buildContainerArgs(
   }
 
   // OneCLI gateway — injects HTTPS_PROXY + certs so container API calls
-  // are routed through the agent vault for credential injection. Treated as
-  // a transient hard failure: if we can't wire the gateway, we don't spawn.
-  // The caller (router or host-sweep) catches the throw, leaves the inbound
-  // message pending, and the next sweep tick retries.
-  if (agentIdentifier) {
-    await onecli.ensureAgent({ name: agentGroup.name, identifier: agentIdentifier });
+  // are routed through the agent vault for credential injection.
+  //
+  // Botdanov-deploy patch: upstream treats OneCLI failure as a hard error
+  // and refuses to spawn. For deployments that route API calls through
+  // the exe.dev *.int.exe.xyz proxies (which inject their own auth at the
+  // edge), OneCLI is irrelevant at runtime, so we log a warning and spawn
+  // anyway. Matches the @onecli-sh/sdk 0.3.1 behavior on this fork.
+  try {
+    if (agentIdentifier) {
+      await onecli.ensureAgent({ name: agentGroup.name, identifier: agentIdentifier });
+    }
+    const onecliApplied = await onecli.applyContainerConfig(args, { addHostMapping: false, agent: agentIdentifier });
+    if (onecliApplied) {
+      log.info('OneCLI gateway applied', { containerName });
+    } else {
+      log.warn('OneCLI gateway not applied — container will have no OneCLI-injected credentials (exe.dev proxies still work)', { containerName });
+    }
+  } catch (err) {
+    log.warn('OneCLI gateway error — container will spawn without OneCLI credentials (exe.dev proxies still work)', {
+      containerName,
+      err,
+    });
   }
-  const onecliApplied = await onecli.applyContainerConfig(args, { addHostMapping: false, agent: agentIdentifier });
-  if (!onecliApplied) {
-    throw new Error('OneCLI gateway not applied — refusing to spawn container without credentials');
-  }
-  log.info('OneCLI gateway applied', { containerName });
 
   // Host gateway
   args.push(...hostGatewayArgs());
