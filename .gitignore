@@ -11,15 +11,11 @@ store/
 data/
 logs/
 
-# Groups - per-installation state, not tracked.
+# Groups - per-installation state, not tracked. container.json is a
+# spawn-materialized output of the container_configs DB row, not source;
+# editing or tracking it is fighting the system. See docs/db-central.md §1.15.
 # Agent knowledge bases live in their own repos (mounted via additionalMounts).
 groups/*
-# Exception: Botdanov's container.json is canonical deploy config (mounts,
-# group id) and survives rebases when tracked. Persona/memory/state remain
-# ignored — knowledge base is in the botdanov repo, not here.
-!groups/botdanov/
-groups/botdanov/*
-!groups/botdanov/container.json
 
 # Composer-managed CLAUDE.md artifacts (regenerated every spawn)
 **/.claude-shared.md
