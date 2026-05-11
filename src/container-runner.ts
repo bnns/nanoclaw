@@ -22,6 +22,7 @@ import {
   TIMEZONE,
 } from './config.js';
 import { materializeContainerJson } from './container-config.js';
+import type { AdditionalMountConfig } from './container-config.js';
 import { getContainerConfig } from './db/container-configs.js';
 import { updateContainerConfigScalars, updateContainerConfigJson } from './db/container-configs.js';
 import { CONTAINER_RUNTIME_BIN, hostGatewayArgs, readonlyMountArgs, stopContainer } from './container-runtime.js';
@@ -419,6 +420,61 @@ function syncSkillSymlinks(claudeDir: string, containerConfig: import('./contain
   }
 }
 
+
+/**
+ * Decrypt a group-scoped secrets file (if any) on the host at spawn time
+ * and return its env var map.
+ *
+ * Convention: any of the group's additional-mount host paths can either
+ * be a `.secrets.env.gpg` file directly, or a directory containing one.
+ * The symmetric passphrase lives at `/etc/nanoclaw-secrets.key`.
+ *
+ * Injecting these at container start lets the agent reach the host-api
+ * (and S3/DO Spaces) without calling `decrypt-secrets.sh` from every
+ * shell — a per-call cost in tokens and latency.
+ */
+function getGroupSecretsEnv(mounts: AdditionalMountConfig[]): Record<string, string> {
+  const KEYFILE = '/etc/nanoclaw-secrets.key';
+  if (!fs.existsSync(KEYFILE)) return {};
+
+  let encFile: string | null = null;
+  for (const m of mounts) {
+    if (m.hostPath.endsWith('.secrets.env.gpg') && fs.existsSync(m.hostPath)) {
+      encFile = m.hostPath;
+      break;
+    }
+    const inDir = path.join(m.hostPath, '.secrets.env.gpg');
+    if (fs.existsSync(inDir)) {
+      encFile = inDir;
+      break;
+    }
+  }
+  if (!encFile) return {};
+
+  let plaintext: string;
+  try {
+    plaintext = execSync(
+      `gpg --batch --yes --quiet --decrypt --passphrase-file ${KEYFILE} ${encFile}`,
+      { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] },
+    );
+  } catch (err) {
+    log.warn('Group secrets decrypt failed', { encFile, err: String(err) });
+    return {};
+  }
+
+  const env: Record<string, string> = {};
+  for (const line of plaintext.split('\n')) {
+    const match = line.match(/^export\s+([A-Z][A-Z0-9_]*)=(.*)$/);
+    if (!match) continue;
+    let val = match[2];
+    const dq = val.startsWith('"') && val.endsWith('"');
+    const sq = val.startsWith("'") && val.endsWith("'");
+    if (dq || sq) val = val.slice(1, -1);
+    env[match[1]] = val;
+  }
+  return env;
+}
+
 async function buildContainerArgs(
   mounts: VolumeMount[],
   containerName: string,
@@ -448,6 +504,16 @@ async function buildContainerArgs(
     for (const [key, value] of Object.entries(providerContribution.env)) {
       args.push('-e', `${key}=${value}`);
     }
+  }
+
+  // Group-scoped secrets — decrypt the group's `.secrets.env.gpg` on host
+  // and inject as -e vars. No-op for groups without an encrypted file.
+  const groupSecrets = getGroupSecretsEnv(containerConfig.additionalMounts);
+  for (const [key, value] of Object.entries(groupSecrets)) {
+    args.push('-e', `${key}=${value}`);
+  }
+  if (Object.keys(groupSecrets).length > 0) {
+    log.info('Injected group secrets', { group: agentGroup.name, count: Object.keys(groupSecrets).length });
   }
 
   // OneCLI gateway — injects HTTPS_PROXY + certs so container API calls
