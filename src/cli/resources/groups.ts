@@ -1,4 +1,4 @@
-import type { McpServerConfig } from '../../container-config.js';
+import type { AdditionalMountConfig, McpServerConfig } from '../../container-config.js';
 import { buildAgentGroupImage, killContainer, wakeContainer } from '../../container-runner.js';
 import { restartAgentGroupContainers } from '../../container-restart.js';
 import { getSession } from '../../db/sessions.js';
@@ -276,6 +276,78 @@ registerResource({
         return {
           removed: { apt: apt || null, npm: npm || null },
           note: 'Image rebuild required for package changes to take effect.',
+        };
+      },
+    },
+    'config add-mount': {
+      access: 'approval',
+      description:
+        'Add a host-path mount to a group. Requires `ncl groups restart` to take effect. ' +
+        'Use --id <group-id> --host-path <abs-path> [--container-path <rel-path>] [--read-only]. ' +
+        'If --container-path is omitted it defaults to basename(host-path). ' +
+        'Mount is read-write by default; pass --read-only for read-only. ' +
+        'Host-path must be allowlisted in ~/.config/nanoclaw/mount-allowlist.json.',
+      handler: async (args) => {
+        const id = args.id as string;
+        if (!id) throw new Error('--id is required');
+        const hostPath = args.host_path as string;
+        if (!hostPath) throw new Error('--host-path is required');
+        const containerPath =
+          (args.container_path as string | undefined) || hostPath.split('/').filter(Boolean).pop() || '';
+        if (
+          !containerPath ||
+          containerPath.startsWith('/') ||
+          containerPath.includes('..') ||
+          containerPath.includes(':')
+        ) {
+          throw new Error(
+            `Invalid container-path "${containerPath}": must be a non-empty relative path with no ".." or ":"`,
+          );
+        }
+        const readOnly = args.read_only === true || args.read_only === 'true';
+
+        const row = getContainerConfig(id);
+        if (!row) throw new Error(`No container config for group: ${id}`);
+
+        const mounts = JSON.parse(row.additional_mounts) as AdditionalMountConfig[];
+        if (mounts.some((m) => m.containerPath === containerPath)) {
+          throw new Error(
+            `A mount already exists with container-path "${containerPath}". Remove it first or pick a different container-path.`,
+          );
+        }
+        mounts.push({ hostPath, containerPath, readonly: readOnly });
+        updateContainerConfigJson(id, 'additional_mounts', mounts);
+
+        return {
+          added: { hostPath, containerPath, readonly: readOnly },
+          note: 'Run `ncl groups restart --id <id>` to apply.',
+        };
+      },
+    },
+    'config remove-mount': {
+      access: 'approval',
+      description:
+        'Remove a host-path mount from a group. Requires `ncl groups restart` to take effect. ' +
+        'Use --id <group-id> --container-path <rel-path>.',
+      handler: async (args) => {
+        const id = args.id as string;
+        if (!id) throw new Error('--id is required');
+        const containerPath = args.container_path as string;
+        if (!containerPath) throw new Error('--container-path is required');
+
+        const row = getContainerConfig(id);
+        if (!row) throw new Error(`No container config for group: ${id}`);
+
+        const mounts = JSON.parse(row.additional_mounts) as AdditionalMountConfig[];
+        const filtered = mounts.filter((m) => m.containerPath !== containerPath);
+        if (filtered.length === mounts.length) {
+          throw new Error(`No mount with container-path "${containerPath}" found`);
+        }
+        updateContainerConfigJson(id, 'additional_mounts', filtered);
+
+        return {
+          removed: containerPath,
+          remaining: filtered.length,
         };
       },
     },
