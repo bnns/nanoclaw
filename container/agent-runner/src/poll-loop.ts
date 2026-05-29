@@ -1,5 +1,11 @@
 import { findByName, getAllDestinations, type DestinationEntry } from './destinations.js';
-import { getPendingMessages, markProcessing, markCompleted, type MessageInRow } from './db/messages-in.js';
+import {
+  getPendingMessages,
+  markProcessing,
+  markCompleted,
+  releaseProcessing,
+  type MessageInRow,
+} from './db/messages-in.js';
 import { writeMessageOut } from './db/messages-out.js';
 import { getInboundDb, touchHeartbeat, clearStaleProcessingAcks } from './db/connection.js';
 import { clearContinuation, migrateLegacyContinuation, setContinuation } from './db/session-state.js';
@@ -17,6 +23,36 @@ import type { AgentProvider, AgentQuery, ProviderEvent } from './providers/types
 
 const POLL_INTERVAL_MS = 1000;
 const ACTIVE_POLL_INTERVAL_MS = 500;
+
+// Patterns that indicate the provider surfaced a transient API failure as
+// the model's response text rather than throwing. When detected we end the
+// query, release the messages back to pending, clear the continuation, and
+// back off — without this the failure text gets dispatched (or pollutes the
+// session transcript) and follow-up messages keep getting pushed into a
+// poisoned query.
+const API_FAILURE_PATTERNS: readonly RegExp[] = [
+  /credit balance is too low/i,
+  /insufficient_quota/i,
+  /overloaded_error/i,
+  /rate_limit_error/i,
+];
+
+// Exponential backoff schedule between API-failure retries. The outer loop
+// indexes into this array by `consecutiveApiFailures - 1`, clamping at the
+// last entry. Tuned for "you forgot to top up the wallet" timescales: cheap
+// (just init+result+end per attempt) but doesn't hammer the API.
+const API_FAILURE_BACKOFF_MS: readonly number[] = [
+  30_000,    // 30s
+  60_000,    // 1m
+  120_000,   // 2m
+  300_000,   // 5m
+  600_000,   // 10m (sustained)
+];
+
+function detectApiFailure(text: string | null | undefined): boolean {
+  if (!text) return false;
+  return API_FAILURE_PATTERNS.some((p) => p.test(text));
+}
 
 function log(msg: string): void {
   console.error(`[poll-loop] ${msg}`);
@@ -68,6 +104,11 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
 
   let pollCount = 0;
   let isFirstPoll = true;
+  // Counts consecutive outer iterations whose query result tripped an API
+  // failure pattern. Used to index into API_FAILURE_BACKOFF_MS so repeated
+  // failures back off geometrically. Reset to 0 the moment a clean result
+  // comes through.
+  let consecutiveApiFailures = 0;
   while (true) {
     // Skip system messages — they're responses for MCP tools (e.g., ask_user_question)
     const messages = getPendingMessages(isFirstPoll).filter((m) => m.kind !== 'system');
@@ -180,12 +221,16 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
     // Publish the batch's in_reply_to so MCP tools (send_message, send_file)
     // can stamp it on outbound rows — needed for a2a return-path routing.
     setCurrentInReplyTo(routing.inReplyTo);
+    let apiFailureThisTurn = false;
+    let apiFailureSample: string | null = null;
     try {
       const result = await processQuery(query, routing, processingIds, config.providerName);
       if (result.continuation && result.continuation !== continuation) {
         continuation = result.continuation;
         setContinuation(config.providerName, continuation);
       }
+      apiFailureThisTurn = result.apiFailure;
+      apiFailureSample = result.apiFailureSample ?? null;
     } catch (err) {
       const errMsg = err instanceof Error ? err.message : String(err);
       log(`Query error: ${errMsg}`);
@@ -212,6 +257,34 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
       clearCurrentInReplyTo();
     }
 
+    if (apiFailureThisTurn) {
+      // The SDK surfaced a transient API failure (credit balance, quota,
+      // overload) as the model's response text rather than throwing. We
+      // already aborted the query inside processQuery and skipped the
+      // markCompleted there — release the processing claims so the same
+      // messages get reprocessed on the next outer iteration, clear the
+      // continuation so we don't resume a poisoned transcript, and back
+      // off geometrically.
+      releaseProcessing(processingIds);
+      if (continuation) {
+        clearContinuation(config.providerName);
+        continuation = undefined;
+      }
+      consecutiveApiFailures++;
+      const backoffMs =
+        API_FAILURE_BACKOFF_MS[
+          Math.min(consecutiveApiFailures - 1, API_FAILURE_BACKOFF_MS.length - 1)
+        ];
+      log(
+        `API failure (${apiFailureSample?.slice(0, 80) ?? '?'}); ` +
+          `consecutive=${consecutiveApiFailures}, backing off ${backoffMs}ms, ` +
+          `${processingIds.length} message(s) re-queued`,
+      );
+      await sleep(backoffMs);
+      continue;
+    }
+
+    consecutiveApiFailures = 0;
     // Ensure completed even if processQuery ended without a result event
     // (e.g. stream closed unexpectedly).
     markCompleted(processingIds);
@@ -255,6 +328,15 @@ function formatMessagesWithCommands(messages: MessageInRow[], nativeSlashCommand
 
 interface QueryResult {
   continuation?: string;
+  /**
+   * True if the SDK surfaced a transient API failure (credit balance, quota,
+   * overload) as result text — see API_FAILURE_PATTERNS. The outer loop
+   * handles release + backoff; processQuery is just responsible for aborting
+   * the query and signaling.
+   */
+  apiFailure: boolean;
+  /** Short excerpt of the failure text, for logging. */
+  apiFailureSample?: string;
 }
 
 async function processQuery(
@@ -265,6 +347,8 @@ async function processQuery(
 ): Promise<QueryResult> {
   let queryContinuation: string | undefined;
   let done = false;
+  let apiFailure = false;
+  let apiFailureSample: string | undefined;
 
   // Concurrent polling: push follow-ups into the active query as they arrive.
   // We do NOT force-end the stream on silence — keeping the query open avoids
@@ -368,6 +452,21 @@ async function processQuery(
         // Claude session with no prior context.
         setContinuation(providerName, event.continuation);
       } else if (event.type === 'result') {
+        // Transient-API-failure short circuit: if the result text matches a
+        // known API-failure pattern (credit balance, quota, overload), DO
+        // NOT mark completed, DO NOT dispatch — abort the query and let the
+        // outer loop release+backoff. Without this, the failure text either
+        // gets sent to users as a reply or, more commonly, gets recorded
+        // into the SDK's session transcript as the assistant's own response
+        // — and the model then pattern-matches off its own prior turns and
+        // keeps emitting that text even after the underlying API recovers.
+        if (detectApiFailure(event.text)) {
+          apiFailure = true;
+          apiFailureSample = event.text ?? undefined;
+          log(`API failure in result text — aborting query for backoff`);
+          query.abort();
+          break;
+        }
         // A result — with or without text — means the turn is done. Mark
         // the initial batch completed now so the host sweep doesn't see
         // stale 'processing' claims while the query stays open for
@@ -402,7 +501,7 @@ async function processQuery(
     clearInterval(pollHandle);
   }
 
-  return { continuation: queryContinuation };
+  return { continuation: queryContinuation, apiFailure, apiFailureSample };
 }
 
 function handleEvent(event: ProviderEvent, _routing: RoutingContext): void {

@@ -77,9 +77,28 @@ function resolveRouting(
   const dest = findByName(to);
   if (!dest) return { error: `Unknown destination "${to}". Known: ${destinationList()}` };
   if (dest.type === 'channel') {
-    // If the destination is the same channel the session is bound to,
-    // preserve the thread_id so replies land in the correct thread.
     const session = getSessionRouting();
+    // Botdanov-deploy: when the destination's channel TYPE matches the session
+    // (both 'discord' etc.) but the platform_ids differ — typically because the
+    // destination is configured as a DM address but the session lives in a guild
+    // channel/thread — prefer the session's platform_id + thread_id. This keeps
+    // replies in the channel where the user wrote rather than misrouting to DMs
+    // just because the agent named the destination after the user.
+    if (
+      session.channel_type === dest.channelType &&
+      session.platform_id &&
+      session.thread_id &&
+      session.platform_id !== dest.platformId
+    ) {
+      return {
+        channel_type: dest.channelType!,
+        platform_id: session.platform_id,
+        thread_id: session.thread_id,
+        resolvedName: to,
+      };
+    }
+    // Default: use destination's static platform_id, preserve thread_id only
+    // when it matches the session's bound channel exactly.
     const threadId =
       session.channel_type === dest.channelType && session.platform_id === dest.platformId ? session.thread_id : null;
     return {

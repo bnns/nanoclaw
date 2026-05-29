@@ -420,7 +420,6 @@ function syncSkillSymlinks(claudeDir: string, containerConfig: import('./contain
   }
 }
 
-
 /**
  * Decrypt a group-scoped secrets file (if any) on the host at spawn time
  * and return its env var map.
@@ -453,10 +452,10 @@ function getGroupSecretsEnv(mounts: AdditionalMountConfig[]): Record<string, str
 
   let plaintext: string;
   try {
-    plaintext = execSync(
-      `gpg --batch --yes --quiet --decrypt --passphrase-file ${KEYFILE} ${encFile}`,
-      { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] },
-    );
+    plaintext = execSync(`gpg --batch --yes --quiet --decrypt --passphrase-file ${KEYFILE} ${encFile}`, {
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
   } catch (err) {
     log.warn('Group secrets decrypt failed', { encFile, err: String(err) });
     return {};

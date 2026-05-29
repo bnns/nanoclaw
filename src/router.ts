@@ -30,6 +30,7 @@ import { findSessionForAgent } from './db/sessions.js';
 import { startTypingRefresh, stopTypingRefresh } from './modules/typing/index.js';
 import { log } from './log.js';
 import { resolveSession, writeSessionMessage, writeOutboundDirect } from './session-manager.js';
+import { isStickyStillActive } from './sticky-expiry.js';
 import { wakeContainer } from './container-runner.js';
 import { getSession } from './db/sessions.js';
 import type { AgentGroup, MessagingGroup, MessagingGroupAgent } from './types.js';
@@ -391,10 +392,14 @@ function evaluateEngage(
     case 'mention-sticky': {
       if (isMention) return true;
       // Sticky follow-up: session already exists for this (agent, mg, thread)
-      // — the thread was activated before, keep firing.
+      // — the thread was activated before, keep firing, subject to the
+      // sticky-expiry rule (see src/sticky-expiry.ts). Without expiry, a
+      // single @-mention in a thread subscribes the agent forever; with it,
+      // stale threads quietly fall through and require a fresh @-mention.
       if (mg.is_group === 0) return false; // DMs never use mention-sticky sensibly
       const existing = findSessionForAgent(agent.agent_group_id, mg.id, threadId);
-      return existing !== undefined;
+      if (existing === undefined) return false;
+      return isStickyStillActive(agent.agent_group_id, existing.id);
     }
     default:
       return false;
