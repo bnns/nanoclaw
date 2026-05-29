@@ -120,6 +120,23 @@ export function markCompleted(ids: string[]): void {
   })();
 }
 
+/**
+ * Release processing claims so messages return to the pending pool. Used by
+ * the API-failure backoff path in the poll loop: when the provider surfaces a
+ * transient API failure (spend/usage cap, depleted credit balance, quota,
+ * overload) as result text instead of throwing, we want the messages to
+ * reprocess on a later outer-loop iteration rather than be marked completed
+ * and dropped.
+ */
+export function releaseProcessing(ids: string[]): void {
+  if (ids.length === 0) return;
+  const db = getOutboundDb();
+  const stmt = db.prepare('DELETE FROM processing_ack WHERE message_id = ?');
+  db.transaction(() => {
+    for (const id of ids) stmt.run(id);
+  })();
+}
+
 /** Mark a single message as failed — writes to processing_ack in outbound.db. */
 export function markFailed(id: string): void {
   getOutboundDb()
