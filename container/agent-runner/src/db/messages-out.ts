@@ -46,6 +46,47 @@ export function writeMessageOut(msg: WriteMessageOut): number {
   const outbound = getOutboundDb();
   const inbound = getInboundDb();
 
+  // Idempotency guard against double-emit. The agent can emit the same reply
+  // through two output channels in a single turn — the send_message MCP tool
+  // and a <message to="..."> block in its final text (dispatched by the
+  // poll-loop). Each path writes its own messages_out row: identical content,
+  // distinct id/seq. Host delivery dedups per-id, so it ships both and the
+  // user sees the message twice.
+  //
+  // Byte-identical content to the same destination within a short window is
+  // always this double-emit, never an intentional repeat. Collapse it: skip
+  // the insert and return the existing row's seq so the caller's message id
+  // still resolves. Scoped to immediate, non-recurring sends so scheduled and
+  // recurring messages — which legitimately repeat — are never suppressed.
+  if (msg.deliver_after == null && msg.recurrence == null) {
+    const dup = outbound
+      .prepare(
+        `SELECT seq FROM messages_out
+         WHERE content = $content
+           AND kind = $kind
+           AND IFNULL(platform_id, '') = IFNULL($platform_id, '')
+           AND IFNULL(channel_type, '') = IFNULL($channel_type, '')
+           AND IFNULL(thread_id, '') = IFNULL($thread_id, '')
+           AND deliver_after IS NULL
+           AND timestamp >= datetime('now', '-30 seconds')
+         ORDER BY seq DESC
+         LIMIT 1`,
+      )
+      .get({
+        $content: msg.content,
+        $kind: msg.kind,
+        $platform_id: msg.platform_id ?? null,
+        $channel_type: msg.channel_type ?? null,
+        $thread_id: msg.thread_id ?? null,
+      }) as { seq: number } | undefined;
+    if (dup) {
+      console.error(
+        `[messages-out] Suppressed duplicate emission (seq ${dup.seq}, ${msg.content.length} chars) — identical content sent to the same destination <30s ago`,
+      );
+      return dup.seq;
+    }
+  }
+
   // Read max seq from both DBs to maintain global ordering.
   // Safe: each side only reads the other DB, never writes to it.
   const maxOut = (outbound.prepare('SELECT COALESCE(MAX(seq), 0) AS m FROM messages_out').get() as { m: number }).m;
