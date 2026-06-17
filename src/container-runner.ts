@@ -420,7 +420,6 @@ function syncSkillSymlinks(claudeDir: string, containerConfig: import('./contain
   }
 }
 
-
 /**
  * Decrypt a group-scoped secrets file (if any) on the host at spawn time
  * and return its env var map.
@@ -453,10 +452,10 @@ function getGroupSecretsEnv(mounts: AdditionalMountConfig[]): Record<string, str
 
   let plaintext: string;
   try {
-    plaintext = execSync(
-      `gpg --batch --yes --quiet --decrypt --passphrase-file ${KEYFILE} ${encFile}`,
-      { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] },
-    );
+    plaintext = execSync(`gpg --batch --yes --quiet --decrypt --passphrase-file ${KEYFILE} ${encFile}`, {
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
   } catch (err) {
     log.warn('Group secrets decrypt failed', { encFile, err: String(err) });
     return {};
@@ -519,29 +518,36 @@ async function buildContainerArgs(
   // OneCLI gateway — injects HTTPS_PROXY + certs so container API calls
   // are routed through the agent vault for credential injection.
   //
-  // Botdanov-deploy patch: upstream treats OneCLI failure as a hard error
-  // and refuses to spawn. For deployments that route API calls through
-  // the exe.dev *.int.exe.xyz proxies (which inject their own auth at the
-  // edge), OneCLI is irrelevant at runtime, so we log a warning and spawn
-  // anyway. Matches the @onecli-sh/sdk 0.3.1 behavior on this fork.
-  try {
-    if (agentIdentifier) {
-      await onecli.ensureAgent({ name: agentGroup.name, identifier: agentIdentifier });
+  // Opt-in: when ONECLI_API_KEY is unset the SDK has no credential, so every
+  // spawn would hit app.onecli.sh and 401. This deployment routes all API
+  // calls through the exe.dev *.int.exe.xyz proxies, which inject their own
+  // auth at the edge, so OneCLI is irrelevant at runtime — skip it entirely
+  // instead of failing noisily on each spawn. Set ONECLI_API_KEY in .env to
+  // re-enable (the gateway block below is the original Botdanov-deploy patch,
+  // which logs a warning and spawns anyway rather than treating OneCLI failure
+  // as a hard error like upstream does).
+  if (!ONECLI_API_KEY) {
+    log.debug('OneCLI gateway skipped - ONECLI_API_KEY unset; exe.dev proxies inject auth', { containerName });
+  } else {
+    try {
+      if (agentIdentifier) {
+        await onecli.ensureAgent({ name: agentGroup.name, identifier: agentIdentifier });
+      }
+      const onecliApplied = await onecli.applyContainerConfig(args, { addHostMapping: false, agent: agentIdentifier });
+      if (onecliApplied) {
+        log.info('OneCLI gateway applied', { containerName });
+      } else {
+        log.warn(
+          'OneCLI gateway not applied — container will have no OneCLI-injected credentials (exe.dev proxies still work)',
+          { containerName },
+        );
+      }
+    } catch (err) {
+      log.warn('OneCLI gateway error — container will spawn without OneCLI credentials (exe.dev proxies still work)', {
+        containerName,
+        err,
+      });
     }
-    const onecliApplied = await onecli.applyContainerConfig(args, { addHostMapping: false, agent: agentIdentifier });
-    if (onecliApplied) {
-      log.info('OneCLI gateway applied', { containerName });
-    } else {
-      log.warn(
-        'OneCLI gateway not applied — container will have no OneCLI-injected credentials (exe.dev proxies still work)',
-        { containerName },
-      );
-    }
-  } catch (err) {
-    log.warn('OneCLI gateway error — container will spawn without OneCLI credentials (exe.dev proxies still work)', {
-      containerName,
-      err,
-    });
   }
 
   // Host gateway
