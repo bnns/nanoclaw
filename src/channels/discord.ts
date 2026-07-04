@@ -20,9 +20,14 @@ function extractReplyContext(raw: Record<string, any>): ReplyContext | null {
 
 // Collapse `[X](Y)` → `Y` when X equals Y exactly. Discord renders masked
 // links only when the label differs from the URL; identical pairs render as
-// literal markdown, which agents sometimes emit when they have no better
-// label than the URL itself. Other masked links (label != URL) pass through
-// unchanged so descriptive ones still render as clickable text.
+// literal markdown. Other masked links (label != URL) pass through unchanged
+// so descriptive ones still render as clickable text.
+//
+// These degenerate pairs are mostly *manufactured by the adapter itself*: it
+// re-renders outbound markdown through an AST round-trip, where a bare URL
+// parses as a GFM autolink and re-serializes as [url](url). That happens
+// after transformOutboundText, so the collapse must also be applied to the
+// converter's output (see the fromAst wrap in the factory below).
 function collapseDegenerateMaskedLinks(text: string): string {
   return text.replace(/\[([^\]\n]+)\]\(([^)\s]+)\)/g, (match, label, url) =>
     label.trim() === url.trim() ? url : match,
@@ -38,6 +43,18 @@ registerChannelAdapter('discord', {
       publicKey: env.DISCORD_PUBLIC_KEY,
       applicationId: env.DISCORD_APPLICATION_ID,
     });
+    // formatConverter is private in the typings but reachable at runtime;
+    // renderPostable calls this.fromAst, so an own-property wrap shadows the
+    // class method and post-processes everything the converter renders.
+    const conv = (
+      discordAdapter as unknown as {
+        formatConverter?: { fromAst(ast: unknown): string };
+      }
+    ).formatConverter;
+    if (conv) {
+      const origFromAst = conv.fromAst.bind(conv);
+      conv.fromAst = (ast: unknown) => collapseDegenerateMaskedLinks(origFromAst(ast));
+    }
     return createChatSdkBridge({
       adapter: discordAdapter,
       concurrency: 'concurrent',
