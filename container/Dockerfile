@@ -115,6 +115,14 @@ RUN --mount=type=cache,target=/root/.cache/pnpm \
 RUN printf '#!/bin/sh\nexec bun /app/src/cli/ncl.ts "$@"\n' > /usr/local/bin/ncl && \
     chmod +x /usr/local/bin/ncl
 
+# ---- Scripting tools used by the agent's guides -----------------------------
+# The knowledge-base guides run python3 and jq snippets in bash; without them
+# every such snippet failed in the container. Its own layer, late in the file,
+# so adding it doesn't invalidate the heavy layers above (a full rebuild
+# needs ~3.5GB free on the VM).
+RUN apt-get update && apt-get install -y --no-install-recommends python3 jq \
+    && rm -rf /var/lib/apt/lists/*
+
 # ---- Entrypoint --------------------------------------------------------------
 COPY entrypoint.sh /app/entrypoint.sh
 RUN chmod +x /app/entrypoint.sh
