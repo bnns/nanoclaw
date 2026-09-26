@@ -563,12 +563,25 @@ export class ClaudeProvider implements AgentProvider {
           yield { type: 'result', text, isError, usage: takeTurnUsage() };
         } else if (message.type === 'system' && (message as { subtype?: string }).subtype === 'api_retry') {
           yield { type: 'error', message: 'API retry', retryable: true };
-        } else if (message.type === 'system' && (message as { subtype?: string }).subtype === 'rate_limit_event') {
-          yield { type: 'error', message: 'Rate limit', retryable: false, classification: 'quota' };
+        } else if ((message as { type: string }).type === 'rate_limit_event') {
+          // A top-level event (not a system subtype). Only claude.ai
+          // subscription auth emits it; log anything other than 'allowed'.
+          const info = (message as { rate_limit_info?: { status?: string; rateLimitType?: string; resetsAt?: number } })
+            .rate_limit_info;
+          if (info?.status && info.status !== 'allowed') {
+            yield {
+              type: 'error',
+              message: `Rate limit ${info.status} (${info.rateLimitType ?? 'unknown'}, resets ${info.resetsAt ?? '?'})`,
+              retryable: info.status !== 'rejected',
+              classification: 'quota',
+            };
+          }
         } else if (message.type === 'system' && (message as { subtype?: string }).subtype === 'compact_boundary') {
           const meta = (message as { compact_metadata?: { pre_tokens?: number } }).compact_metadata;
           const detail = meta?.pre_tokens ? ` (${meta.pre_tokens.toLocaleString()} tokens compacted)` : '';
-          yield { type: 'result', text: `Context compacted${detail}.` };
+          // Progress, not a result: the turn is still running. Yielding a
+          // result here marked the batch completed before the real answer.
+          yield { type: 'progress', message: `Context compacted${detail}.` };
         } else if (message.type === 'system' && (message as { subtype?: string }).subtype === 'task_notification') {
           const tn = message as { summary?: string };
           yield { type: 'progress', message: tn.summary || 'Task notification' };

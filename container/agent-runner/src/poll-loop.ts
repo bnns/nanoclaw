@@ -7,7 +7,7 @@ import {
   type MessageInRow,
 } from './db/messages-in.js';
 import { writeMessageOut } from './db/messages-out.js';
-import { getInboundDb, touchHeartbeat, clearStaleProcessingAcks } from './db/connection.js';
+import { getInboundDb, getOutboundDb, touchHeartbeat, clearStaleProcessingAcks } from './db/connection.js';
 import { clearContinuation, migrateLegacyContinuation, setContinuation } from './db/session-state.js';
 import { clearCurrentInReplyTo, setCurrentInReplyTo } from './current-batch.js';
 import {
@@ -92,6 +92,14 @@ const TURN_FAILED_NOTICE =
   'Comrade, something went wrong on my side while working on this, and I could not finish. ' +
   'Please try again in a little while.';
 
+/** Highest seq of a chat row in outbound.db — used to tell whether a turn sent anything. */
+function maxChatOutSeq(): number {
+  const row = getOutboundDb().prepare("SELECT COALESCE(MAX(seq), 0) AS s FROM messages_out WHERE kind = 'chat'").get() as {
+    s: number;
+  };
+  return row.s;
+}
+
 /**
  * Report a turn's token usage to the host for per-user budget accounting.
  * `messageIds` are the messages_in ids the turn answered; the host resolves
@@ -118,6 +126,13 @@ function reportUsage(usage: TurnUsage | undefined, messageIds: string[], routing
  * time ("regain access on …"), it's appended.
  */
 function rateLimitNotice(sample: string | null | undefined): string {
+  if (sample && /overloaded/i.test(sample)) {
+    // Transient capacity problem on the provider side, not a spent budget.
+    return (
+      `Comrade, my thinking apparatus is overwhelmed at this moment. ` +
+      `I will take this up again shortly — no need to repeat yourself.`
+    );
+  }
   const m = sample?.match(/regain access on ([^."]+)/i);
   const when = m ? ` It should return ${m[1].trim()}.` : '';
   return (
@@ -308,8 +323,12 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
     setCurrentInReplyTo(routing.inReplyTo);
     let apiFailureThisTurn = false;
     let apiFailureSample: string | null = null;
+    // Follow-ups pushed into the query that no result has completed yet.
+    // processQuery completes them at each result; anything left here when it
+    // returns or throws is settled below with the initial batch.
+    const openFollowUps: string[] = [];
     try {
-      const result = await processQuery(query, routing, processingIds, config.providerName);
+      const result = await processQuery(query, routing, processingIds, config.providerName, openFollowUps);
       if (result.continuation && result.continuation !== continuation) {
         continuation = result.continuation;
         setContinuation(config.providerName, continuation);
@@ -351,7 +370,7 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
       // claims so the same messages reprocess on a later iteration, clear the
       // (now-poisoned) continuation, notify the user once in-voice, then back
       // off geometrically. The `continue` skips the markCompleted() below.
-      releaseProcessing(processingIds);
+      releaseProcessing([...processingIds, ...openFollowUps]);
       if (continuation) {
         clearContinuation(config.providerName);
         continuation = undefined;
@@ -381,7 +400,7 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
 
     // Ensure completed even if processQuery ended without a result event
     // (e.g. stream closed unexpectedly).
-    markCompleted(processingIds);
+    markCompleted([...processingIds, ...openFollowUps]);
     log(`Completed ${ids.length} message(s)`);
   }
 }
@@ -433,15 +452,22 @@ async function processQuery(
   routing: RoutingContext,
   initialBatchIds: string[],
   providerName: string,
+  openFollowUps: string[],
 ): Promise<QueryResult> {
   let queryContinuation: string | undefined;
   let done = false;
   let unwrappedNudged = false;
   let apiFailure = false;
   let apiFailureSample: string | undefined;
-  // messages_in ids the current turn is answering (initial batch, then any
-  // follow-ups pushed mid-stream). Reset after each result.
+  // messages_in ids pushed since the last result (the initial batch, then
+  // follow-ups). Usage for a result is attributed to these. A follow-up that
+  // arrives mid-turn is usually answered by the *next* turn, and a re-wrap
+  // nudge turn has no new ids at all — so when a result has none, it is
+  // attributed to the previous turn's ids (same conversation, same people).
   let turnIds: string[] = [...initialBatchIds];
+  let lastAttributedIds: string[] = [...initialBatchIds];
+  // Chat rows at or below this seq predate the current turn.
+  let turnStartChatSeq = maxChatOutSeq();
 
   // Concurrent polling: push follow-ups into the active query as they arrive.
   // We do NOT force-end the stream on silence — keeping the query open avoids
@@ -519,7 +545,9 @@ async function processQuery(
         unwrappedNudged = false;
         query.push(prompt);
         turnIds.push(...keptIds);
-        markCompleted(keptIds);
+        // Completed at the next result, not now — if the turn fails or the
+        // container dies first, they must not be lost.
+        openFollowUps.push(...keptIds);
       } catch (err) {
         // Without this catch the rejection escapes the void IIFE and Node
         // terminates the container on unhandled-rejection. The initial-batch
@@ -581,7 +609,9 @@ async function processQuery(
         // transcript: the model then echoes that text on later turns even
         // after the underlying API recovers.
         // The tokens were spent whether or not the turn succeeded.
-        reportUsage(event.usage, turnIds, routing);
+        const attributed = turnIds.length > 0 ? turnIds : lastAttributedIds;
+        reportUsage(event.usage, attributed, routing);
+        lastAttributedIds = attributed;
         turnIds = [];
         if (detectApiFailure(event.text, event.isError === true)) {
           apiFailure = true;
@@ -596,7 +626,9 @@ async function processQuery(
         // follow-up pushes. The agent may have responded via MCP
         // (send_message) mid-turn, or the message may not need a response
         // at all — either way the turn is finished.
-        markCompleted(initialBatchIds);
+        markCompleted([...initialBatchIds, ...openFollowUps]);
+        openFollowUps.length = 0;
+        const sentThisTurn = maxChatOutSeq() > turnStartChatSeq;
         if (event.isError) {
           // Not a reply — the text is error detail. Log it, tell the user
           // in-voice, and don't dispatch or nudge.
@@ -610,8 +642,11 @@ async function processQuery(
             content: JSON.stringify({ text: TURN_FAILED_NOTICE }),
           });
         } else if (event.text) {
-          const { hasUnwrapped } = dispatchResultText(event.text, routing);
-          if (hasUnwrapped && !unwrappedNudged) {
+          const { sent, hasUnwrapped } = dispatchResultText(event.text, routing);
+          // Nudge only when nothing reached the chat this turn — not via
+          // <message> blocks, not via the send_message tool. Unwrapped text
+          // next to a delivered reply is scratchpad.
+          if (hasUnwrapped && sent === 0 && !sentThisTurn && !unwrappedNudged) {
             unwrappedNudged = true;
             const destinations = getAllDestinations();
             const names = destinations.map((d) => d.name).join(', ');
@@ -623,6 +658,7 @@ async function processQuery(
             );
           }
         }
+        turnStartChatSeq = maxChatOutSeq();
       }
     }
   } finally {

@@ -58,7 +58,9 @@ export function writeMessageOut(msg: WriteMessageOut): number {
   // the insert and return the existing row's seq so the caller's message id
   // still resolves. Scoped to immediate, non-recurring sends so scheduled and
   // recurring messages — which legitimately repeat — are never suppressed.
-  if (msg.deliver_after == null && msg.recurrence == null) {
+  // Chat only: system actions (record_usage, schedule_task, ...) can
+  // legitimately repeat byte-for-byte and are never double-emitted.
+  if (msg.kind === 'chat' && msg.deliver_after == null && msg.recurrence == null) {
     const dup = outbound
       .prepare(
         `SELECT seq FROM messages_out

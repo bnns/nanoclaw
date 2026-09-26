@@ -29,10 +29,16 @@ import type { Session } from './types.js';
 
 const ACTIVE_POLL_MS = 1000;
 const SWEEP_POLL_MS = 60_000;
-const MAX_DELIVERY_ATTEMPTS = 3;
+/**
+ * Wait before each retry of a failed delivery. Time-based rather than
+ * per-poll: at the 1s active poll, three attempts used to span ~2s, so a
+ * short platform outage dropped the message for good. This spans ~4 min.
+ */
+const DELIVERY_BACKOFF_MS = [2_000, 5_000, 15_000, 30_000, 60_000, 120_000];
+const MAX_DELIVERY_ATTEMPTS = DELIVERY_BACKOFF_MS.length + 1;
 
-/** Track delivery attempt counts. Resets on process restart (gives failed messages a fresh chance). */
-const deliveryAttempts = new Map<string, number>();
+/** Delivery attempts and the earliest next try, per message. Resets on process restart (gives failed messages a fresh chance). */
+const deliveryAttempts = new Map<string, { attempts: number; nextAt: number }>();
 
 /**
  * Sessions whose outbound queue is currently being drained.
@@ -188,6 +194,8 @@ async function drainSession(session: Session): Promise<void> {
     migrateDeliveredTable(inDb);
 
     for (const msg of undelivered) {
+      const retry = deliveryAttempts.get(msg.id);
+      if (retry && Date.now() < retry.nextAt) continue;
       try {
         const platformMsgId = await deliverMessage(msg, session, inDb);
         markDelivered(inDb, msg.id, platformMsgId ?? null);
@@ -203,8 +211,8 @@ async function drainSession(session: Session): Promise<void> {
           pauseTypingRefreshAfterDelivery(session.id);
         }
       } catch (err) {
-        const attempts = (deliveryAttempts.get(msg.id) ?? 0) + 1;
-        deliveryAttempts.set(msg.id, attempts);
+        const attempts = (deliveryAttempts.get(msg.id)?.attempts ?? 0) + 1;
+        deliveryAttempts.set(msg.id, { attempts, nextAt: Date.now() + (DELIVERY_BACKOFF_MS[attempts - 1] ?? 0) });
         if (attempts >= MAX_DELIVERY_ATTEMPTS) {
           log.error('Message delivery failed permanently, giving up', {
             messageId: msg.id,

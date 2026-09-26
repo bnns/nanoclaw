@@ -373,6 +373,27 @@ describe('poll loop — error results and usage reporting', () => {
     await loopPromise.catch(() => {});
   });
 
+  it('attributes a result with no new messages (e.g. a re-wrap turn) to the previous turn', async () => {
+    insertMessage('m1', { sender: 'Alice', text: 'hi' }, { platformId: 'chan-1', channelType: 'discord' });
+
+    const provider = new ScriptedProvider([
+      { type: 'result', text: 'unwrapped reply', usage },
+      { type: 'result', text: '<message to="discord-test">wrapped reply</message>', usage },
+    ]);
+    const controller = new AbortController();
+    const loopPromise = runPollLoopWithTimeout(provider as unknown as MockProvider, controller.signal, 2000);
+
+    await waitFor(() => getUndeliveredMessages().filter((m) => m.kind === 'system').length >= 2, 2000);
+    controller.abort();
+
+    const system = getUndeliveredMessages()
+      .filter((m) => m.kind === 'system')
+      .map((m) => JSON.parse(m.content));
+    expect(system.map((u) => u.messageIds)).toEqual([['m1'], ['m1']]);
+
+    await loopPromise.catch(() => {});
+  });
+
   it('does not mistake a reply that quotes an API error for an API failure', async () => {
     insertMessage('m1', { sender: 'Alice', text: 'what happened?' }, { platformId: 'chan-1', channelType: 'discord' });
 

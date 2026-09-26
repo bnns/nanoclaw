@@ -155,8 +155,43 @@ describe('deliverSessionMessages — concurrent invocations', () => {
   });
 });
 
+// Retries are time-based (2s .. 120s backoff, 7 attempts). Fake Date and
+// jump past the backoff before each attempt.
+const MAX_ATTEMPTS = 7;
+async function attemptAfterBackoff(session: Parameters<typeof deliverSessionMessages>[0]): Promise<void> {
+  vi.setSystemTime(Date.now() + 10 * 60_000);
+  await deliverSessionMessages(session);
+}
+
 describe('deliverSessionMessages — retry and permanent failure', () => {
-  it('retries on adapter failure and marks failed after MAX_DELIVERY_ATTEMPTS (3)', async () => {
+  beforeEach(() => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('does not retry before the backoff has passed', async () => {
+    seedAgentAndChannel();
+    const { session } = resolveSession('ag-1', 'mg-1', null, 'shared');
+    insertOutbound('ag-1', session.id, 'out-backoff');
+
+    let callCount = 0;
+    setDeliveryAdapter({
+      async deliver() {
+        callCount++;
+        throw new Error('network timeout');
+      },
+    });
+
+    await deliverSessionMessages(session);
+    await deliverSessionMessages(session); // immediately — still backing off
+    expect(callCount).toBe(1);
+    await attemptAfterBackoff(session);
+    expect(callCount).toBe(2);
+  });
+
+  it('retries on adapter failure and marks failed after MAX_DELIVERY_ATTEMPTS', async () => {
     seedAgentAndChannel();
     const { session } = resolveSession('ag-1', 'mg-1', null, 'shared');
     insertOutbound('ag-1', session.id, 'out-flaky');
@@ -169,21 +204,14 @@ describe('deliverSessionMessages — retry and permanent failure', () => {
       },
     });
 
-    // Attempt 1
-    await deliverSessionMessages(session);
-    expect(callCount).toBe(1);
+    for (let i = 1; i <= MAX_ATTEMPTS; i++) {
+      await attemptAfterBackoff(session);
+      expect(callCount).toBe(i);
+    }
 
-    // Attempt 2
-    await deliverSessionMessages(session);
-    expect(callCount).toBe(2);
-
-    // Attempt 3 — should mark as permanently failed
-    await deliverSessionMessages(session);
-    expect(callCount).toBe(3);
-
-    // Attempt 4 — message is now in delivered (as failed), adapter not called
-    await deliverSessionMessages(session);
-    expect(callCount).toBe(3);
+    // Past the limit — message is now in delivered (as failed), adapter not called
+    await attemptAfterBackoff(session);
+    expect(callCount).toBe(MAX_ATTEMPTS);
 
     // Verify the message is in the delivered table with 'failed' status
     const inDb = openInboundDb('ag-1', session.id);
@@ -211,11 +239,11 @@ describe('deliverSessionMessages — retry and permanent failure', () => {
     expect(callCount).toBe(1);
 
     // Attempt 2 — succeeds
-    await deliverSessionMessages(session);
+    await attemptAfterBackoff(session);
     expect(callCount).toBe(2);
 
     // Attempt 3 — not called, message already delivered
-    await deliverSessionMessages(session);
+    await attemptAfterBackoff(session);
     expect(callCount).toBe(2);
   });
 });
@@ -256,10 +284,10 @@ describe('deliverSessionMessages — permission check', () => {
       },
     });
 
-    // Deliver 3 times to exhaust retries
-    await deliverSessionMessages(session);
-    await deliverSessionMessages(session);
-    await deliverSessionMessages(session);
+    // Exhaust retries
+    vi.useFakeTimers({ toFake: ['Date'] });
+    for (let i = 0; i < MAX_ATTEMPTS; i++) await attemptAfterBackoff(session);
+    vi.useRealTimers();
 
     // Adapter never called — permission check throws before reaching it
     expect(calls).toHaveLength(0);

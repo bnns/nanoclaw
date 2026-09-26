@@ -103,20 +103,86 @@ function resolveSelectedOption(
   return candidate;
 }
 
+/**
+ * Room left under the platform limit. The adapter re-renders markdown before
+ * sending (which can lengthen it) and truncates anything over the limit with
+ * "...", and a chunk that ends inside a code block needs a closing fence.
+ */
+const SPLIT_RESERVE = 100;
+
+/**
+ * Split text into chunks that fit `limit`, preferring paragraph, line, then
+ * word boundaries. Code fences stay balanced: a chunk that ends inside a
+ * ``` block is closed, and the next chunk reopens it with the same info
+ * string, so each chunk renders on its own.
+ */
 export function splitForLimit(text: string, limit: number): string[] {
-  if (text.length <= limit) return [text];
+  const budget = limit - Math.min(SPLIT_RESERVE, Math.floor(limit / 20));
+  if (text.length <= budget) return [text];
   const chunks: string[] = [];
   let remaining = text;
-  while (remaining.length > limit) {
-    let cut = remaining.lastIndexOf('\n\n', limit);
-    if (cut <= 0) cut = remaining.lastIndexOf('\n', limit);
-    if (cut <= 0) cut = remaining.lastIndexOf(' ', limit);
-    if (cut <= 0) cut = limit;
-    chunks.push(remaining.slice(0, cut).trimEnd());
-    remaining = remaining.slice(cut).trimStart();
+  let reopen = ''; // "```lang\n" carried into the next chunk
+  while (reopen.length + remaining.length > budget) {
+    const room = budget - reopen.length;
+    let cut = remaining.lastIndexOf('\n\n', room);
+    if (cut <= 0) cut = remaining.lastIndexOf('\n', room);
+    if (cut <= 0) cut = remaining.lastIndexOf(' ', room);
+    if (cut <= 0) cut = room;
+    let chunk = reopen + remaining.slice(0, cut).trimEnd();
+    remaining = remaining.slice(cut);
+    const lang = openFenceInfo(chunk);
+    if (lang !== null) {
+      chunk += '\n```';
+      reopen = '```' + lang + '\n';
+      // Inside code, leading whitespace is content — drop only the newlines.
+      remaining = remaining.replace(/^\n+/, '');
+    } else {
+      reopen = '';
+      remaining = remaining.trimStart();
+    }
+    chunks.push(chunk);
   }
-  if (remaining.length > 0) chunks.push(remaining);
+  if (remaining.length > 0) chunks.push(reopen + remaining);
   return chunks;
+}
+
+/** The info string of the ``` fence `text` ends inside ('' if none given), or null if not in a fence. */
+function openFenceInfo(text: string): string | null {
+  let info: string | null = null;
+  for (const line of text.split('\n')) {
+    const m = line.match(/^\s*```(.*)$/);
+    if (m) info = info === null ? m[1].trim() : null;
+  }
+  return info;
+}
+
+/** How long to wait before retrying a platform call that was rate-limited, or null if it wasn't a 429. */
+function retryAfterMs(err: unknown): number | null {
+  const msg = err instanceof Error ? err.message : String(err);
+  const m = msg.match(/\b429\b\s*(\{[\s\S]*\})?/);
+  if (!m) return null;
+  let seconds = 1;
+  try {
+    const body = JSON.parse(m[1] ?? '{}') as { retry_after?: unknown };
+    if (typeof body.retry_after === 'number') seconds = body.retry_after;
+  } catch {
+    // Keep the default.
+  }
+  return Math.min(30_000, Math.ceil(seconds * 1000) + 250);
+}
+
+/** Run a platform call, waiting out up to three 429s (each capped at 30s). */
+async function withRateLimitRetry<T>(fn: () => Promise<T>): Promise<T> {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return await fn();
+    } catch (err) {
+      const wait = retryAfterMs(err);
+      if (wait === null || attempt >= 3) throw err;
+      log.warn('Rate limited by platform, waiting before retry', { waitMs: wait, attempt: attempt + 1 });
+      await new Promise((resolve) => setTimeout(resolve, wait));
+    }
+  }
 }
 
 export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter {
@@ -126,6 +192,10 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
   let state: SqliteStateAdapter;
   let setupConfig: ChannelSetup;
   let gatewayAbort: AbortController | null = null;
+  // Chunks of a split reply already posted, keyed by destination + text. A
+  // failure on chunk k makes delivery retry the whole message; without this
+  // the retry re-posts chunks 0..k-1. Entries are removed on success.
+  const postedChunks = new Map<string, { count: number; firstId?: string }>();
 
   /**
    * Inject the thread name into the message content so the agent knows
@@ -493,21 +563,25 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
         }));
         // Split if over the adapter's max length. Files ride on the first
         // chunk so the head of the reply still carries them.
-        const chunks =
-          config.maxTextLength && text.length > config.maxTextLength
-            ? splitForLimit(text, config.maxTextLength)
-            : [text];
-        let firstId: string | undefined;
-        for (let i = 0; i < chunks.length; i++) {
+        const chunks = config.maxTextLength ? splitForLimit(text, config.maxTextLength) : [text];
+        const key = `${tid}\u0000${text}`;
+        const progress = postedChunks.get(key) ?? { count: 0 };
+        if (progress.count > 0) log.info('Resuming split reply after partial delivery', { tid, posted: progress.count, total: chunks.length });
+        for (let i = progress.count; i < chunks.length; i++) {
           const chunk = chunks[i];
           const attachFiles = i === 0 && fileUploads && fileUploads.length > 0;
-          const result = await adapter.postMessage(
-            tid,
-            attachFiles ? { markdown: chunk, files: fileUploads } : { markdown: chunk },
+          const result = await withRateLimitRetry(() =>
+            adapter.postMessage(tid, attachFiles ? { markdown: chunk, files: fileUploads } : { markdown: chunk }),
           );
-          if (i === 0) firstId = result?.id;
+          if (i === 0) progress.firstId = result?.id;
+          progress.count = i + 1;
+          if (i < chunks.length - 1) {
+            if (postedChunks.size >= 500) postedChunks.delete(postedChunks.keys().next().value!);
+            postedChunks.set(key, progress);
+          }
         }
-        return firstId;
+        postedChunks.delete(key);
+        return progress.firstId;
       } else if (message.files && message.files.length > 0) {
         // Files only, no text
         const fileUploads = message.files.map((f: { data: Buffer; filename: string }) => ({

@@ -50,6 +50,30 @@ describe('splitForLimit', () => {
   });
 });
 
+describe('splitForLimit — code fences and headroom', () => {
+  it('closes a code block at a chunk boundary and reopens it with the same language', () => {
+    const code = Array.from({ length: 300 }, (_, i) => `  line ${i}`).join('\n');
+    const text = `Intro.\n\n\`\`\`python\n${code}\n\`\`\`\n\nOutro.`;
+    const chunks = splitForLimit(text, 2000);
+    expect(chunks.length).toBeGreaterThan(1);
+    for (const c of chunks) {
+      expect(c.length).toBeLessThanOrEqual(1900);
+      // Every chunk has balanced fences.
+      expect((c.match(/^\s*```/gm) ?? []).length % 2).toBe(0);
+    }
+    expect(chunks[1].startsWith('```python\n')).toBe(true);
+    // Indentation inside the code survives the split.
+    expect(chunks[1].split('\n')[1].startsWith('  line ')).toBe(true);
+  });
+
+  it('leaves headroom under a 2000 limit for re-rendering', () => {
+    const text = 'word '.repeat(395).trim(); // ~1975 chars
+    const chunks = splitForLimit(text, 2000);
+    expect(chunks.length).toBe(2);
+    for (const c of chunks) expect(c.length).toBeLessThanOrEqual(1900);
+  });
+});
+
 describe('createChatSdkBridge', () => {
   // The bridge is now transport-only: forward inbound events, relay outbound
   // ops. All per-wiring engage / accumulate / drop / subscribe decisions live
