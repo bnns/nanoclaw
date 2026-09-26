@@ -299,6 +299,77 @@ function findTranscriptPath(sessionId: string): string | null {
   return null;
 }
 
+/** Token counts from an API `usage` object (assistant message or transcript entry). */
+function tokensFromUsage(u: Record<string, unknown>): ModelTokens {
+  const n = (v: unknown): number => (typeof v === 'number' ? v : 0);
+  const cc = (u.cache_creation ?? {}) as Record<string, unknown>;
+  const write1h = n(cc.ephemeral_1h_input_tokens);
+  // Older usage shapes only report the total; treat it as 5m.
+  const write5m =
+    cc.ephemeral_5m_input_tokens !== undefined ? n(cc.ephemeral_5m_input_tokens) : n(u.cache_creation_input_tokens) - write1h;
+  return {
+    input: n(u.input_tokens),
+    output: n(u.output_tokens),
+    cacheRead: n(u.cache_read_input_tokens),
+    cacheWrite5m: write5m,
+    cacheWrite1h: write1h,
+  };
+}
+
+/** Bytes read from the end of each transcript when looking up a turn's usage. */
+const USAGE_TAIL_BYTES = 8 * 1024 * 1024;
+
+/**
+ * Final usage per API message id, read from the session transcript and any
+ * subagent transcripts (`<sessionId>/subagents/*.jsonl`). The assistant
+ * messages the SDK streams carry the usage from the start of the API
+ * response — output_tokens is ~1-2 — while the transcript entry has the
+ * final counts. Only the tail of each file is read: a turn's messages are
+ * the most recent entries.
+ */
+export function finalUsageFromTranscripts(sessionId: string, ids: Set<string>): Map<string, ModelTokens> {
+  const found = new Map<string, ModelTokens>();
+  const main = findTranscriptPath(sessionId);
+  if (!main) return found;
+  const files = [main];
+  const subDir = path.join(path.dirname(main), sessionId, 'subagents');
+  try {
+    for (const f of fs.readdirSync(subDir)) if (f.endsWith('.jsonl')) files.push(path.join(subDir, f));
+  } catch {
+    // No subagents this session.
+  }
+  for (const file of files) {
+    let text: string;
+    try {
+      const size = fs.statSync(file).size;
+      const start = Math.max(0, size - USAGE_TAIL_BYTES);
+      const fd = fs.openSync(file, 'r');
+      try {
+        const buf = Buffer.alloc(size - start);
+        fs.readSync(fd, buf, 0, buf.length, start);
+        text = buf.toString('utf-8');
+      } finally {
+        fs.closeSync(fd);
+      }
+    } catch {
+      continue;
+    }
+    for (const line of text.split('\n')) {
+      if (!line.includes('"assistant"')) continue;
+      try {
+        const entry = JSON.parse(line) as { type?: string; message?: { id?: string; usage?: Record<string, unknown> } };
+        const id = entry.message?.id;
+        if (entry.type === 'assistant' && id && ids.has(id) && entry.message?.usage) {
+          found.set(id, tokensFromUsage(entry.message.usage));
+        }
+      } catch {
+        // First line of a tail read is usually partial.
+      }
+    }
+  }
+  return found;
+}
+
 /** Epoch-ms of the first transcript entry, or null if unreadable. */
 function transcriptStartMs(transcriptPath: string): number | null {
   try {
@@ -445,7 +516,15 @@ export class ClaudeProvider implements AgentProvider {
       // The result's total_cost_usd/modelUsage are process-cumulative and
       // priced by the CLI's own tables, so they aren't used for billing.
       let turnMessages = new Map<string, { model: string; tokens: ModelTokens }>();
+      let sessionId: string | undefined;
       const takeTurnUsage = (): TurnUsage => {
+        if (sessionId && turnMessages.size > 0) {
+          const final = finalUsageFromTranscripts(sessionId, new Set(turnMessages.keys()));
+          for (const [id, tokens] of final) turnMessages.get(id)!.tokens = tokens;
+          if (final.size < turnMessages.size) {
+            log(`Usage: ${turnMessages.size - final.size}/${turnMessages.size} message(s) not in transcript; using streamed counts`);
+          }
+        }
         const usage: TurnUsage = {};
         for (const { model, tokens } of turnMessages.values()) {
           const acc = (usage[model] ??= { input: 0, output: 0, cacheRead: 0, cacheWrite5m: 0, cacheWrite1h: 0 });
@@ -465,31 +544,14 @@ export class ClaudeProvider implements AgentProvider {
         if (message.type === 'assistant') {
           const m = message.message;
           const u = m?.usage as unknown as Record<string, unknown> | undefined;
-          if (m?.id && m.model && u) {
-            const n = (v: unknown): number => (typeof v === 'number' ? v : 0);
-            const cc = (u.cache_creation ?? {}) as Record<string, unknown>;
-            const write1h = n(cc.ephemeral_1h_input_tokens);
-            // Older usage shapes only report the total; treat it as 5m.
-            const write5m = cc.ephemeral_5m_input_tokens !== undefined
-              ? n(cc.ephemeral_5m_input_tokens)
-              : n(u.cache_creation_input_tokens) - write1h;
-            turnMessages.set(m.id, {
-              model: m.model,
-              tokens: {
-                input: n(u.input_tokens),
-                output: n(u.output_tokens),
-                cacheRead: n(u.cache_read_input_tokens),
-                cacheWrite5m: write5m,
-                cacheWrite1h: write1h,
-              },
-            });
-          }
+          if (m?.id && m.model && u) turnMessages.set(m.id, { model: m.model, tokens: tokensFromUsage(u) });
         }
 
         // Yield activity for every SDK event so the poll loop knows the agent is working
         yield { type: 'activity' };
 
         if (message.type === 'system' && message.subtype === 'init') {
+          sessionId = message.session_id;
           yield { type: 'init', continuation: message.session_id };
         } else if (message.type === 'result') {
           // Error results (error_during_execution, error_max_turns, ...) carry
