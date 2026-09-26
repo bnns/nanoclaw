@@ -42,6 +42,16 @@ const SDK_DISALLOWED_TOOLS = [
   'ExitPlanMode',
   'EnterWorktree',
   'ExitWorktree',
+  // Claude Code tools with no use in a chat agent. Every tool definition is
+  // sent (and cache-written) at the start of each session; these six were
+  // ~12K of a ~44K-token session start on claude-opus-5-5 (measured
+  // 2026-09-26 by capturing a real first request).
+  'DesignSync',
+  'Monitor',
+  'Workflow',
+  'ReportFindings',
+  'NotebookEdit',
+  'PushNotification',
 ];
 
 // Tool allowlist for NanoClaw agent containers. MCP-tool entries are derived
