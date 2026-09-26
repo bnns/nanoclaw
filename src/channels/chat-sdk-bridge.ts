@@ -566,7 +566,12 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
         const chunks = config.maxTextLength ? splitForLimit(text, config.maxTextLength) : [text];
         const key = `${tid}\u0000${text}`;
         const progress = postedChunks.get(key) ?? { count: 0 };
-        if (progress.count > 0) log.info('Resuming split reply after partial delivery', { tid, posted: progress.count, total: chunks.length });
+        if (progress.count > 0)
+          log.info('Resuming split reply after partial delivery', {
+            tid,
+            posted: progress.count,
+            total: chunks.length,
+          });
         for (let i = progress.count; i < chunks.length; i++) {
           const chunk = chunks[i];
           const attachFiles = i === 0 && fileUploads && fileUploads.length > 0;
