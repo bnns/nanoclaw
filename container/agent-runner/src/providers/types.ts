@@ -94,9 +94,31 @@ export interface AgentQuery {
   abort(): void;
 }
 
+/**
+ * Tokens one turn consumed on one model. Cache writes are split by TTL
+ * because they are priced differently (5m = 1.25x input, 1h = 2x).
+ */
+export interface ModelTokens {
+  input: number;
+  output: number;
+  cacheRead: number;
+  cacheWrite5m: number;
+  cacheWrite1h: number;
+}
+
+/** Per-model token usage for one turn, keyed by model id. */
+export type TurnUsage = Record<string, ModelTokens>;
+
 export type ProviderEvent =
   | { type: 'init'; continuation: string }
-  | { type: 'result'; text: string | null }
+  | {
+      type: 'result';
+      text: string | null;
+      /** The turn failed (API error, max turns, execution error). `text` then carries the error detail, not a reply. */
+      isError?: boolean;
+      /** Tokens this turn used, for per-user budget accounting. */
+      usage?: TurnUsage;
+    }
   | { type: 'error'; message: string; retryable: boolean; classification?: string }
   | { type: 'progress'; message: string }
   /**

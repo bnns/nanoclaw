@@ -19,7 +19,7 @@ import {
   stripInternalTags,
   type RoutingContext,
 } from './formatter.js';
-import type { AgentProvider, AgentQuery, ProviderEvent } from './providers/types.js';
+import type { AgentProvider, AgentQuery, ProviderEvent, TurnUsage } from './providers/types.js';
 
 const POLL_INTERVAL_MS = 1000;
 const ACTIVE_POLL_INTERVAL_MS = 500;
@@ -72,9 +72,41 @@ const API_FAILURE_PATTERNS: readonly RegExp[] = [
  */
 const API_FAILURE_BACKOFF_MS: readonly number[] = [30_000, 60_000, 120_000, 300_000, 600_000];
 
-function detectApiFailure(text: string | null | undefined): boolean {
+function detectApiFailure(text: string | null | undefined, isError: boolean): boolean {
   if (!text) return false;
+  // A real reply is wrapped in <message> blocks and may legitimately quote
+  // these strings (e.g. operators discussing an outage). Only treat the text
+  // as an API failure when the SDK flagged the turn as an error, or when it
+  // has no <message> block at all.
+  if (!isError && /<message\s+to="/.test(text)) return false;
   return API_FAILURE_PATTERNS.some((p) => p.test(text));
+}
+
+/**
+ * In-voice notice for a turn that failed for a non-quota reason (execution
+ * error, max turns, an API error the patterns above don't cover). Without
+ * this the user gets silence: the error text is not a reply, so nothing
+ * would be dispatched.
+ */
+const TURN_FAILED_NOTICE =
+  'Comrade, something went wrong on my side while working on this, and I could not finish. ' +
+  'Please try again in a little while.';
+
+/**
+ * Report a turn's token usage to the host for per-user budget accounting.
+ * `messageIds` are the messages_in ids the turn answered; the host resolves
+ * their senders and splits the cost among the ones that triggered a wake.
+ */
+function reportUsage(usage: TurnUsage | undefined, messageIds: string[], routing: RoutingContext): void {
+  if (!usage || Object.keys(usage).length === 0) return;
+  writeMessageOut({
+    id: generateId(),
+    kind: 'system',
+    platform_id: routing.platformId,
+    channel_type: routing.channelType,
+    thread_id: routing.threadId,
+    content: JSON.stringify({ action: 'record_usage', messageIds, usage }),
+  });
 }
 
 /**
@@ -297,14 +329,16 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
         clearContinuation(config.providerName);
       }
 
-      // Write error response so the user knows something went wrong
+      // Tell the user in-voice that something went wrong. The raw error
+      // (e.g. "Claude Code process exited with code 1") is logged above,
+      // not posted.
       writeMessageOut({
         id: generateId(),
         kind: 'chat',
         platform_id: routing.platformId,
         channel_type: routing.channelType,
         thread_id: routing.threadId,
-        content: JSON.stringify({ text: `Error: ${errMsg}` }),
+        content: JSON.stringify({ text: TURN_FAILED_NOTICE }),
       });
     } finally {
       clearCurrentInReplyTo();
@@ -405,6 +439,9 @@ async function processQuery(
   let unwrappedNudged = false;
   let apiFailure = false;
   let apiFailureSample: string | undefined;
+  // messages_in ids the current turn is answering (initial batch, then any
+  // follow-ups pushed mid-stream). Reset after each result.
+  let turnIds: string[] = [...initialBatchIds];
 
   // Concurrent polling: push follow-ups into the active query as they arrive.
   // We do NOT force-end the stream on silence — keeping the query open avoids
@@ -481,6 +518,7 @@ async function processQuery(
         log(`Pushing ${keep.length} follow-up message(s) into active query`);
         unwrappedNudged = false;
         query.push(prompt);
+        turnIds.push(...keptIds);
         markCompleted(keptIds);
       } catch (err) {
         // Without this catch the rejection escapes the void IIFE and Node
@@ -542,7 +580,10 @@ async function processQuery(
         // the failure text as the assistant's own turn would poison the
         // transcript: the model then echoes that text on later turns even
         // after the underlying API recovers.
-        if (detectApiFailure(event.text)) {
+        // The tokens were spent whether or not the turn succeeded.
+        reportUsage(event.usage, turnIds, routing);
+        turnIds = [];
+        if (detectApiFailure(event.text, event.isError === true)) {
           apiFailure = true;
           apiFailureSample = event.text ?? undefined;
           log('API failure detected in result text — aborting query for backoff');
@@ -556,7 +597,19 @@ async function processQuery(
         // (send_message) mid-turn, or the message may not need a response
         // at all — either way the turn is finished.
         markCompleted(initialBatchIds);
-        if (event.text) {
+        if (event.isError) {
+          // Not a reply — the text is error detail. Log it, tell the user
+          // in-voice, and don't dispatch or nudge.
+          log(`Turn failed: ${event.text?.slice(0, 300) ?? '(no detail)'}`);
+          writeMessageOut({
+            id: generateId(),
+            kind: 'chat',
+            platform_id: routing.platformId,
+            channel_type: routing.channelType,
+            thread_id: routing.threadId,
+            content: JSON.stringify({ text: TURN_FAILED_NOTICE }),
+          });
+        } else if (event.text) {
           const { hasUnwrapped } = dispatchResultText(event.text, routing);
           if (hasUnwrapped && !unwrappedNudged) {
             unwrappedNudged = true;

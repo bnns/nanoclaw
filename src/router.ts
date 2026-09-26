@@ -31,6 +31,7 @@ import { startTypingRefresh, stopTypingRefresh } from './modules/typing/index.js
 import { log } from './log.js';
 import { resolveSession, writeSessionMessage, writeOutboundDirect } from './session-manager.js';
 import { wakeContainer } from './container-runner.js';
+import { capNotice, checkBudget } from './modules/budget/budget.js';
 import { getSession } from './db/sessions.js';
 import type { AgentGroup, MessagingGroup, MessagingGroupAgent } from './types.js';
 import type { InboundEvent } from './channels/adapter.js';
@@ -451,6 +452,34 @@ async function deliverToAgent(
       });
       log.info('Admin command denied by gate', { command: gate.command, userId, agentGroupId: agent.agent_group_id });
       return;
+    }
+  }
+
+  // Per-user monthly budget. An over-cap user's message is still stored as
+  // context (trigger 0) so the conversation stays coherent, but it doesn't
+  // wake the agent. They get the notice once a day, then just a reaction.
+  if (wake && userId && (event.message.kind === 'chat' || event.message.kind === 'chat-sdk')) {
+    const budget = checkBudget(userId);
+    if (!budget.allowed) {
+      wake = false;
+      const content =
+        budget.sendNotice || !event.message.id
+          ? { text: capNotice(budget.cap ?? 0) }
+          : { operation: 'reaction', messageId: event.message.id, emoji: 'sleeping' };
+      writeOutboundDirect(session.agent_group_id, session.id, {
+        id: `budget-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+        kind: 'chat',
+        platformId: deliveryAddr.platformId,
+        channelType: deliveryAddr.channelType,
+        threadId: deliveryAddr.threadId,
+        content: JSON.stringify(content),
+      });
+      log.info('Over monthly budget — not waking agent', {
+        userId,
+        spent: budget.spent.toFixed(2),
+        cap: budget.cap,
+        notice: budget.sendNotice,
+      });
     }
   }
 

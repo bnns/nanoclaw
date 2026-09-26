@@ -11,5 +11,6 @@ import './members.js';
 import './destinations.js';
 import './user-dms.js';
 import './dropped-messages.js';
+import './budget-resources.js';
 import './approvals.js';
 import './sessions.js';

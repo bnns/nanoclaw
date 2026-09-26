@@ -6,7 +6,16 @@ import { query as sdkQuery, type HookCallback, type PreCompactHookInput } from '
 
 import { clearContainerToolInFlight, setContainerToolInFlight } from '../db/connection.js';
 import { registerProvider } from './provider-registry.js';
-import type { AgentProvider, AgentQuery, McpServerConfig, ProviderEvent, ProviderOptions, QueryInput } from './types.js';
+import type {
+  AgentProvider,
+  AgentQuery,
+  McpServerConfig,
+  ModelTokens,
+  ProviderEvent,
+  ProviderOptions,
+  QueryInput,
+  TurnUsage,
+} from './types.js';
 
 function log(msg: string): void {
   console.error(`[claude-provider] ${msg}`);
@@ -430,9 +439,52 @@ export class ClaudeProvider implements AgentProvider {
 
     async function* translateEvents(): AsyncGenerator<ProviderEvent> {
       let messageCount = 0;
+      // Token usage for the current turn, from each assistant message's API
+      // usage. The SDK emits one assistant message per content block, all
+      // sharing the API message id and usage, so key by id (last wins).
+      // The result's total_cost_usd/modelUsage are process-cumulative and
+      // priced by the CLI's own tables, so they aren't used for billing.
+      let turnMessages = new Map<string, { model: string; tokens: ModelTokens }>();
+      const takeTurnUsage = (): TurnUsage => {
+        const usage: TurnUsage = {};
+        for (const { model, tokens } of turnMessages.values()) {
+          const acc = (usage[model] ??= { input: 0, output: 0, cacheRead: 0, cacheWrite5m: 0, cacheWrite1h: 0 });
+          acc.input += tokens.input;
+          acc.output += tokens.output;
+          acc.cacheRead += tokens.cacheRead;
+          acc.cacheWrite5m += tokens.cacheWrite5m;
+          acc.cacheWrite1h += tokens.cacheWrite1h;
+        }
+        turnMessages = new Map();
+        return usage;
+      };
       for await (const message of sdkResult) {
         if (aborted) return;
         messageCount++;
+
+        if (message.type === 'assistant') {
+          const m = message.message;
+          const u = m?.usage as unknown as Record<string, unknown> | undefined;
+          if (m?.id && m.model && u) {
+            const n = (v: unknown): number => (typeof v === 'number' ? v : 0);
+            const cc = (u.cache_creation ?? {}) as Record<string, unknown>;
+            const write1h = n(cc.ephemeral_1h_input_tokens);
+            // Older usage shapes only report the total; treat it as 5m.
+            const write5m = cc.ephemeral_5m_input_tokens !== undefined
+              ? n(cc.ephemeral_5m_input_tokens)
+              : n(u.cache_creation_input_tokens) - write1h;
+            turnMessages.set(m.id, {
+              model: m.model,
+              tokens: {
+                input: n(u.input_tokens),
+                output: n(u.output_tokens),
+                cacheRead: n(u.cache_read_input_tokens),
+                cacheWrite5m: write5m,
+                cacheWrite1h: write1h,
+              },
+            });
+          }
+        }
 
         // Yield activity for every SDK event so the poll loop knows the agent is working
         yield { type: 'activity' };
@@ -440,8 +492,13 @@ export class ClaudeProvider implements AgentProvider {
         if (message.type === 'system' && message.subtype === 'init') {
           yield { type: 'init', continuation: message.session_id };
         } else if (message.type === 'result') {
-          const text = 'result' in message ? (message as { result?: string }).result ?? null : null;
-          yield { type: 'result', text };
+          // Error results (error_during_execution, error_max_turns, ...) carry
+          // no `result` — the detail is in `errors`. A 'success' result can
+          // still have is_error set (e.g. "API Error: 400 ..." as its text).
+          const r = message as { subtype?: string; is_error?: boolean; result?: string; errors?: string[] };
+          const isError = r.is_error === true || r.subtype !== 'success';
+          const text = r.result ?? (r.errors?.length ? r.errors.join('; ') : null) ?? (isError ? r.subtype ?? null : null);
+          yield { type: 'result', text, isError, usage: takeTurnUsage() };
         } else if (message.type === 'system' && (message as { subtype?: string }).subtype === 'api_retry') {
           yield { type: 'error', message: 'API retry', retryable: true };
         } else if (message.type === 'system' && (message as { subtype?: string }).subtype === 'rate_limit_event') {

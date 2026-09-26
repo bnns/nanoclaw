@@ -325,7 +325,7 @@ function sleep(ms: number): Promise<void> {
 }
 
 describe('poll loop — provider error recovery', () => {
-  it('writes error to outbound and continues loop on provider throw', async () => {
+  it('writes an in-voice notice (not the raw error) and continues loop on provider throw', async () => {
     insertMessage('m1', { sender: 'Alice', text: 'trigger error' }, { platformId: 'chan-1', channelType: 'discord' });
 
     const provider = new ThrowingProvider('API rate limit exceeded');
@@ -337,12 +337,55 @@ describe('poll loop — provider error recovery', () => {
 
     const out = getUndeliveredMessages();
     expect(out).toHaveLength(1);
-    expect(JSON.parse(out[0].content).text).toContain('Error:');
-    expect(JSON.parse(out[0].content).text).toContain('API rate limit exceeded');
+    expect(JSON.parse(out[0].content).text).toContain('something went wrong');
+    expect(JSON.parse(out[0].content).text).not.toContain('API rate limit exceeded');
 
     // Input message should be marked completed despite the error
     const pending = getPendingMessages();
     expect(pending).toHaveLength(0);
+
+    await loopPromise.catch(() => {});
+  });
+});
+
+describe('poll loop — error results and usage reporting', () => {
+  const usage = { 'claude-opus-5-5': { input: 10, output: 20, cacheRead: 30, cacheWrite5m: 40, cacheWrite1h: 0 } };
+
+  it('posts a notice for an error result instead of going silent, and reports usage', async () => {
+    insertMessage('m1', { sender: 'Alice', text: 'hi' }, { platformId: 'chan-1', channelType: 'discord' });
+
+    const provider = new ScriptedProvider([{ type: 'result', text: 'error_max_turns', isError: true, usage }]);
+    const controller = new AbortController();
+    const loopPromise = runPollLoopWithTimeout(provider as unknown as MockProvider, controller.signal, 2000);
+
+    await waitFor(() => getUndeliveredMessages().length >= 2, 2000);
+    controller.abort();
+
+    const out = getUndeliveredMessages();
+    const system = out.filter((m) => m.kind === 'system').map((m) => JSON.parse(m.content));
+    const chat = out.filter((m) => m.kind === 'chat').map((m) => JSON.parse(m.content));
+    expect(system).toEqual([{ action: 'record_usage', messageIds: ['m1'], usage }]);
+    expect(chat).toHaveLength(1);
+    expect(chat[0].text).toContain('something went wrong');
+    expect(chat[0].text).not.toContain('error_max_turns');
+    expect(getPendingMessages()).toHaveLength(0);
+
+    await loopPromise.catch(() => {});
+  });
+
+  it('does not mistake a reply that quotes an API error for an API failure', async () => {
+    insertMessage('m1', { sender: 'Alice', text: 'what happened?' }, { platformId: 'chan-1', channelType: 'discord' });
+
+    const reply = '<message to="discord-test">The log said: credit balance is too low.</message>';
+    const provider = new ScriptedProvider([{ type: 'result', text: reply, usage }]);
+    const controller = new AbortController();
+    const loopPromise = runPollLoopWithTimeout(provider as unknown as MockProvider, controller.signal, 2000);
+
+    await waitFor(() => getUndeliveredMessages().some((m) => m.kind === 'chat'), 2000);
+    controller.abort();
+
+    const chat = getUndeliveredMessages().filter((m) => m.kind === 'chat').map((m) => JSON.parse(m.content));
+    expect(chat.map((c) => c.text)).toEqual(['The log said: credit balance is too low.']);
 
     await loopPromise.catch(() => {});
   });
@@ -363,10 +406,10 @@ describe('poll loop — stale session recovery', () => {
     await waitFor(() => getUndeliveredMessages().length > 0, 2000);
     controller.abort();
 
-    // Error was written to outbound
+    // Failure notice was written to outbound
     const out = getUndeliveredMessages();
     expect(out).toHaveLength(1);
-    expect(JSON.parse(out[0].content).text).toContain('Error:');
+    expect(JSON.parse(out[0].content).text).toContain('something went wrong');
 
     // Continuation was cleared (isSessionInvalid returned true)
     expect(getContinuation('mock')).toBeUndefined();
@@ -414,6 +457,28 @@ describe('poll loop — /clear command', () => {
 /**
  * Provider that throws on every query, simulating API failures.
  */
+/** Provider that yields a fixed list of events for one query. */
+class ScriptedProvider {
+  readonly supportsNativeSlashCommands = false;
+  constructor(private script: object[]) {}
+
+  isSessionInvalid(): boolean {
+    return false;
+  }
+
+  query(_input: { prompt: string; cwd: string }) {
+    const script = this.script;
+    return {
+      push() {},
+      end() {},
+      abort() {},
+      events: (async function* () {
+        for (const event of script) yield event;
+      })(),
+    };
+  }
+}
+
 class ThrowingProvider {
   readonly supportsNativeSlashCommands = false;
   private errorMessage: string;
