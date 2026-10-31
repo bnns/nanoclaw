@@ -1,8 +1,8 @@
 import { describe, expect, it } from 'vitest';
 
-import type { Adapter, AdapterPostableMessage, RawMessage } from 'chat';
+import { defaultEmojiResolver, type Adapter, type AdapterPostableMessage, type RawMessage } from 'chat';
 
-import { createChatSdkBridge, splitForLimit } from './chat-sdk-bridge.js';
+import { createChatSdkBridge, normalizeReactionEmoji, splitForLimit } from './chat-sdk-bridge.js';
 
 function stubAdapter(partial: Partial<Adapter>): Adapter {
   return { name: 'stub', ...partial } as unknown as Adapter;
@@ -21,6 +21,21 @@ function makePostCapture() {
   };
   return { calls, postMessage };
 }
+
+describe('normalizeReactionEmoji', () => {
+  const toDiscord = (e: string) => defaultEmojiResolver.toDiscord(normalizeReactionEmoji(e));
+
+  it('maps Slack-style shortcodes to unicode for Discord', () => {
+    expect(toDiscord('white_check_mark')).toBe('\u2705');
+    expect(toDiscord(':eyes:')).toBe('\u{1F440}');
+  });
+
+  it('keeps normalized names and raw unicode working', () => {
+    expect(toDiscord('check')).toBe('\u2705');
+    expect(toDiscord('thumbs_up')).toBe('\u{1F44D}');
+    expect(toDiscord('\u{1F4D6}')).toBe('\u{1F4D6}');
+  });
+});
 
 describe('splitForLimit', () => {
   it('returns a single chunk when text fits', () => {

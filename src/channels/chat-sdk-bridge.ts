@@ -14,6 +14,7 @@ import {
   Actions,
   Button,
   LinkButton,
+  defaultEmojiResolver,
   type CardChild,
   type Adapter,
   type ConcurrencyStrategy,
@@ -463,7 +464,14 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
       }
 
       if (content.operation === 'reaction' && content.messageId && content.emoji) {
-        await adapter.addReaction(tid, content.messageId as string, content.emoji as string);
+        const emoji = normalizeReactionEmoji(content.emoji as string);
+        try {
+          await adapter.addReaction(tid, content.messageId as string, emoji);
+        } catch (err) {
+          // A reaction is cosmetic, and a bad emoji is a permanent 400 —
+          // retrying it through the delivery loop only spams the log.
+          log.warn('Reaction failed; dropped', { emoji: content.emoji, err });
+        }
         return;
       }
 
@@ -666,6 +674,17 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
   }
 
   return bridge;
+}
+
+/**
+ * Agents pass Slack-style shortcodes (`white_check_mark`, `:eyes:`), the
+ * Chat SDK's normalized names (`check`), or raw unicode. The SDK only maps
+ * normalized names to Discord's unicode, so a shortcode went through raw and
+ * Discord rejected it ("Unknown Emoji"). fromSlack maps known shortcodes to
+ * normalized names and passes anything else through unchanged.
+ */
+export function normalizeReactionEmoji(emoji: string): string {
+  return defaultEmojiResolver.fromSlack(emoji.trim()).name;
 }
 
 /** Constant-time check; hashing first keeps the lengths equal. No token configured means no match. */
