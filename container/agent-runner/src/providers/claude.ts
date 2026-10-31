@@ -71,13 +71,12 @@ const TOOL_ALLOWLIST = [
   'Task',
   'TaskOutput',
   'TaskStop',
-  'TeamCreate',
-  'TeamDelete',
-  'SendMessage',
+  // Agent teams (TeamCreate/TeamDelete/SendMessage) are not allowed: the
+  // persona uses Task subagents, and teams are an experimental feature that
+  // adds parallel spend and tool schemas. NotebookEdit is disallowed above.
   'TodoWrite',
   'ToolSearch',
   'Skill',
-  'NotebookEdit',
 ];
 
 // MCP server names are sanitized by the SDK when forming tool prefixes:

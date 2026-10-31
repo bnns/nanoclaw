@@ -1,7 +1,7 @@
 /**
- * Agent-to-agent module — inter-agent messaging and on-demand agent creation.
+ * Agent-to-agent module — inter-agent messaging.
  *
- * Registers one delivery action (`create_agent`). The sibling `channel_type === 'agent'`
+ * The `channel_type === 'agent'`
  * routing path is NOT a system action — core `delivery.ts` dispatches into
  * `./agent-route.js` via a dynamic import when it sees `msg.channel_type === 'agent'`.
  *
@@ -16,7 +16,8 @@
  * system action logs "Unknown system action", `channel_type='agent'` messages
  * throw because the module isn't installed.
  */
-import { registerDeliveryAction } from '../../delivery.js';
-import { handleCreateAgent } from './create-agent.js';
-
-registerDeliveryAction('create_agent', handleCreateAgent);
+// create_agent is removed in this deployment: the host handler had no
+// authorization, so any prompt-injected turn could create agent groups.
+// Without a registered handler the system action logs "Unknown system
+// action" and is dropped. Agent-to-agent routing below stays.
+export {};

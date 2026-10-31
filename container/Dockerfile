@@ -4,7 +4,7 @@
 #
 # Runtime split:
 #   - agent-runner (our TypeScript code): Bun, mounted RO at /app/src by host
-#   - globally-installed Node CLIs (claude-code, agent-browser, vercel): pnpm + Node
+#   - globally-installed Node CLIs (claude-code, agent-browser): pnpm + Node
 #
 # Source is never baked in — /app/src is provided by a shared read-only
 # bind mount at runtime (see src/container-runner.ts). Source-only changes
@@ -21,7 +21,6 @@ ARG INSTALL_CJK_FONTS=false
 # across all users.
 ARG CLAUDE_CODE_VERSION=2.1.283
 ARG AGENT_BROWSER_VERSION=latest
-ARG VERCEL_VERSION=52.2.1
 ARG BUN_VERSION=1.3.12
 
 # ---- System dependencies -----------------------------------------------------
@@ -99,10 +98,9 @@ ENV PATH="$PNPM_HOME:$PATH"
 ARG PNPM_VERSION=10.33.0
 RUN corepack enable && corepack prepare pnpm@${PNPM_VERSION} --activate
 
-RUN --mount=type=cache,target=/root/.cache/pnpm \
-    echo "only-built-dependencies[]=agent-browser" > /root/.npmrc && \
-    echo "only-built-dependencies[]=@anthropic-ai/claude-code" >> /root/.npmrc && \
-    pnpm install -g "vercel@${VERCEL_VERSION}"
+# (The Vercel CLI was removed: nothing in this deployment deploys to Vercel.)
+RUN echo "only-built-dependencies[]=agent-browser" > /root/.npmrc && \
+    echo "only-built-dependencies[]=@anthropic-ai/claude-code" >> /root/.npmrc
 
 RUN --mount=type=cache,target=/root/.cache/pnpm \
     pnpm install -g "agent-browser@${AGENT_BROWSER_VERSION}"
