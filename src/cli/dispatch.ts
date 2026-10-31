@@ -38,6 +38,15 @@ export async function dispatch(req: RequestFrame, ctx: CallerContext): Promise<R
     return err(req.id, 'unknown-command', `no command "${req.command}"`);
   }
 
+  // Normalize arg names once (dashes → underscores), so the scope checks
+  // below see exactly what the handlers see. Handlers already accept both
+  // spellings, so `--agent-group-id` used to skip the `agent_group_id`
+  // check. Upstream 3bc73128 (GHSA-r7fr-2v6h-rhqf).
+  req = {
+    ...req,
+    args: Object.fromEntries(Object.entries(req.args).map(([k, v]) => [k.replace(/-/g, '_'), v])),
+  };
+
   // CLI scope enforcement for agent callers
   if (ctx.caller === 'agent') {
     const configRow = getContainerConfig(ctx.agentGroupId);
@@ -59,13 +68,14 @@ export async function dispatch(req: RequestFrame, ctx: CallerContext): Promise<R
       // Only check --id for resources where it IS the agent group ID.
       const groupArgs = ['agent_group_id', 'group'] as const;
       for (const key of groupArgs) {
-        if (req.args[key] && req.args[key] !== ctx.agentGroupId) {
+        // `!== undefined`, not truthiness: an empty value must not skip the check.
+        if (req.args[key] !== undefined && req.args[key] !== ctx.agentGroupId) {
           return err(req.id, 'forbidden', 'CLI access is scoped to this agent group.');
         }
       }
       if (
         (cmd.resource === 'groups' || cmd.resource === 'destinations') &&
-        req.args.id &&
+        req.args.id !== undefined &&
         req.args.id !== ctx.agentGroupId
       ) {
         return err(req.id, 'forbidden', 'CLI access is scoped to this agent group.');
@@ -109,9 +119,14 @@ export async function dispatch(req: RequestFrame, ctx: CallerContext): Promise<R
     const agentGroup = getAgentGroup(ctx.agentGroupId);
     const agentName = agentGroup?.name ?? ctx.agentGroupId;
 
-    const argSummary = Object.entries(req.args)
-      .map(([k, v]) => `--${k} ${v}`)
-      .join(' ');
+    // Agent-controlled text on an approval card: fence it, strip backticks
+    // and invisible/control characters so it cannot close the fence or fake
+    // card content, and cap the length. Upstream 8a03d1db.
+    const argSummary = sanitizeForCard(
+      Object.entries(req.args)
+        .map(([k, v]) => `--${k} ${typeof v === 'string' ? v : JSON.stringify(v)}`)
+        .join(' '),
+    );
 
     await requestApproval({
       session,
@@ -119,7 +134,7 @@ export async function dispatch(req: RequestFrame, ctx: CallerContext): Promise<R
       action: 'cli_command',
       payload: { frame: { id: req.id, command: req.command, args: req.args } },
       title: `CLI: ${req.command}`,
-      question: `Agent "${agentName}" wants to run:\n\`ncl ${req.command}${argSummary ? ' ' + argSummary : ''}\``,
+      question: `Agent "${sanitizeForCard(agentName)}" wants to run:\n\`\`\`\nncl ${sanitizeForCard(req.command)}${argSummary ? ' ' + argSummary : ''}\n\`\`\``,
     });
 
     return err(req.id, 'approval-pending', 'Approval request sent to admin. You will be notified of the result.');
@@ -196,4 +211,13 @@ function err(id: string, code: ErrorCode, message: string): ResponseFrame {
 
 function errMsg(e: unknown): string {
   return e instanceof Error ? e.message : String(e);
+}
+
+const CARD_TEXT_MAX = 1500;
+
+/** Make agent-supplied text safe to show inside a code fence on an approval card. */
+function sanitizeForCard(text: string): string {
+  // eslint-disable-next-line no-control-regex
+  const cleaned = text.replace(/[`\u0000-\u0008\u000b-\u001f\u007f\u200b-\u200f\u202a-\u202e\u2060-\u2064\ufeff]/g, '');
+  return cleaned.length > CARD_TEXT_MAX ? cleaned.slice(0, CARD_TEXT_MAX) + ' …[truncated]' : cleaned;
 }

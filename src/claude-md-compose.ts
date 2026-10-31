@@ -14,6 +14,7 @@
  *
  * See `docs/claude-md-composition.md` for the full design.
  */
+import crypto from 'crypto';
 import fs from 'fs';
 import path from 'path';
 
@@ -134,7 +135,12 @@ export function composeGroupClaudeMd(group: AgentGroup): void {
 
   const localFile = path.join(groupDir, 'CLAUDE.local.md');
   if (!fs.existsSync(localFile)) {
-    fs.writeFileSync(localFile, '');
+    // wx: existsSync is false for a dangling symlink; don't follow it.
+    try {
+      fs.writeFileSync(localFile, '', { flag: 'wx' });
+    } catch {
+      /* exists (or a planted link) — leave it */
+    }
   }
 }
 
@@ -208,7 +214,20 @@ function syncSymlink(linkPath: string, target: string): void {
 }
 
 function writeAtomic(filePath: string, content: string): void {
-  const tmp = `${filePath}.tmp-${process.pid}`;
-  fs.writeFileSync(tmp, content);
-  fs.renameSync(tmp, filePath);
+  // The group dir is mounted writable into the container, so the agent can
+  // pre-place a symlink at a predictable temp name and redirect this write
+  // to any host path. Random name + exclusive create refuses that; rename
+  // replaces a link at the final path rather than following it.
+  const tmp = `${filePath}.tmp-${process.pid}-${crypto.randomBytes(6).toString('hex')}`;
+  try {
+    fs.writeFileSync(tmp, content, { flag: 'wx' });
+    fs.renameSync(tmp, filePath);
+  } catch (err) {
+    try {
+      fs.unlinkSync(tmp);
+    } catch {
+      /* not created */
+    }
+    throw err;
+  }
 }

@@ -1,42 +1,27 @@
 /**
  * Handle an admin's response to an approval card.
  *
- * Two categories of pending_approvals rows exist:
- *   1. Module-initiated actions — the module called `requestApproval()` with
- *      some free-form `action` string and registered a handler via
- *      `registerApprovalHandler(action, handler)`. On approve, we look up the
- *      handler and call it; on reject, we notify the agent and move on.
- *   2. OneCLI credential approvals (`action = 'onecli_credential'`). Resolved
- *      via an in-memory Promise — see onecli-approvals.ts.
+ * pending_approvals rows are module-initiated actions — the module called
+ * `requestApproval()` with some free-form `action` string and registered a
+ * handler via `registerApprovalHandler(action, handler)`. On approve, we look
+ * up the handler and call it; on reject, we notify the agent and move on.
  *
  * The response handler is registered via core's `registerResponseHandler`;
  * core iterates handlers and the first one to return `true` claims the response.
  */
 import { wakeContainer } from '../../container-runner.js';
+import { getDb } from '../../db/connection.js';
 import { deletePendingApproval, getPendingApproval, getSession } from '../../db/sessions.js';
 import type { ResponsePayload } from '../../response-registry.js';
 import { log } from '../../log.js';
 import { writeSessionMessage } from '../../session-manager.js';
 import type { PendingApproval } from '../../types.js';
-import { ONECLI_ACTION, resolveOneCLIApproval } from './onecli-approvals.js';
 import { getApprovalHandler } from './primitive.js';
 
 export async function handleApprovalsResponse(payload: ResponsePayload): Promise<boolean> {
-  // OneCLI credential approvals — resolved via in-memory Promise first.
-  if (resolveOneCLIApproval(payload.questionId, payload.value)) {
-    return true;
-  }
-
   // DB-backed pending_approvals.
   const approval = getPendingApproval(payload.questionId);
   if (!approval) return false;
-
-  if (approval.action === ONECLI_ACTION) {
-    // Row exists but the in-memory resolver is gone (timer fired or the process
-    // was in a weird state). Nothing to do — just drop the row.
-    deletePendingApproval(payload.questionId);
-    return true;
-  }
 
   await handleRegisteredApproval(approval, payload.value, payload.userId ?? '');
   return true;
@@ -54,6 +39,14 @@ async function handleRegisteredApproval(
   const session = getSession(approval.session_id);
   if (!session) {
     deletePendingApproval(approval.approval_id);
+    return;
+  }
+
+  // Only an owner/admin for this agent group may answer (upstream 2.1.17).
+  // Cards go to the owner's DM, but a forged interaction or a forwarded card
+  // must not be able to approve. Leave the row so the real admin can answer.
+  if (!isApprover(userId, session.agent_group_id)) {
+    log.warn('Approval response from non-admin ignored', { approvalId: approval.approval_id, userId });
     return;
   }
 
@@ -103,4 +96,20 @@ async function handleRegisteredApproval(
 
   deletePendingApproval(approval.approval_id);
   await wakeContainer(session);
+}
+
+/** Owner/admin check. Click events carry the raw platform id; user_roles
+ *  stores it namespaced (`discord:<id>`), so match either form. */
+function isApprover(userId: string, agentGroupId: string): boolean {
+  if (!userId) return false;
+  const row = getDb()
+    .prepare(
+      `SELECT 1 FROM user_roles
+       WHERE (user_id = ? OR substr(user_id, instr(user_id, ':') + 1) = ?)
+         AND (role = 'owner' OR role = 'admin')
+         AND (agent_group_id IS NULL OR agent_group_id = ?)
+       LIMIT 1`,
+    )
+    .get(userId, userId, agentGroupId);
+  return !!row;
 }

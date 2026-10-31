@@ -63,7 +63,9 @@ export function categorizeMessage(msg: MessageInRow): CommandInfo {
 export function isClearCommand(msg: MessageInRow): boolean {
   const content = parseContent(msg.content);
   const text = (content.text || '').trim();
-  return text.toLowerCase().startsWith('/clear');
+  // Exact command name, like the host gate: a prefix match let `/clearx`
+  // from a non-admin pass the gate (not an admin command) and still clear.
+  return text.split(/\s/)[0].toLowerCase() === '/clear';
 }
 
 /**
