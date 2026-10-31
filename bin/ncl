@@ -24,4 +24,14 @@ SCRIPT_DIR="$(cd -P "$(dirname "$SCRIPT")" && pwd)"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 
 cd "$PROJECT_ROOT"
+# Non-interactive shells (e.g. `ssh host 'ncl ...'`) skip the profile that puts
+# pnpm on PATH. Fall back to the toolchain the nanoclaw service itself uses
+# (see its unit's Environment=PATH): ~/node/bin first, for the Node 22 that
+# matches the compiled better-sqlite3.
+if ! command -v pnpm >/dev/null 2>&1; then
+  for d in "$HOME/.local/bin" "$HOME/node/bin"; do
+    [ -d "$d" ] && PATH="$d:$PATH"
+  done
+  export PATH
+fi
 exec pnpm exec tsx src/cli/client.ts "$@"
