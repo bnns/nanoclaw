@@ -1,13 +1,13 @@
 /**
- * Core MCP tools: send_message, send_file, edit_message, add_reaction.
+ * Core MCP tools: send_message, edit_message, add_reaction.
+ * (send_file is removed in this deployment: the host no longer reads the
+ * session outbox, which the agent can redirect with a symlink.)
  *
  * All outbound tools resolve destinations via the local destination map
  * (see destinations.ts). Agents reference destinations by name; the map
  * translates name → routing tuple. Permission enforcement happens on
  * the host side in delivery.ts via the agent_destinations table.
  */
-import fs from 'fs';
-import path from 'path';
 
 import { getCurrentInReplyTo } from '../current-batch.js';
 import { findByName, getAllDestinations } from '../destinations.js';
@@ -150,53 +150,6 @@ export const sendMessage: McpToolDefinition = {
   },
 };
 
-export const sendFile: McpToolDefinition = {
-  tool: {
-    name: 'send_file',
-    description: 'Send a file to a named destination. If you have only one destination, you can omit `to`.',
-    inputSchema: {
-      type: 'object' as const,
-      properties: {
-        to: { type: 'string', description: 'Destination name. Optional if you have only one destination.' },
-        path: { type: 'string', description: 'File path (relative to /workspace/agent/ or absolute)' },
-        text: { type: 'string', description: 'Optional accompanying message' },
-        filename: { type: 'string', description: 'Display name (default: basename of path)' },
-      },
-      required: ['path'],
-    },
-  },
-  async handler(args) {
-    const filePath = args.path as string;
-    if (!filePath) return err('path is required');
-
-    const routing = resolveRouting(args.to as string | undefined);
-    if ('error' in routing) return err(routing.error);
-
-    const resolvedPath = path.isAbsolute(filePath) ? filePath : path.resolve('/workspace/agent', filePath);
-    if (!fs.existsSync(resolvedPath)) return err(`File not found: ${filePath}`);
-
-    const id = generateId();
-    const filename = (args.filename as string) || path.basename(resolvedPath);
-
-    const outboxDir = path.join('/workspace/outbox', id);
-    fs.mkdirSync(outboxDir, { recursive: true });
-    fs.copyFileSync(resolvedPath, path.join(outboxDir, filename));
-
-    writeMessageOut({
-      id,
-      in_reply_to: getCurrentInReplyTo(),
-      kind: 'chat',
-      platform_id: routing.platform_id,
-      channel_type: routing.channel_type,
-      thread_id: routing.thread_id,
-      content: JSON.stringify({ text: (args.text as string) || '', files: [filename] }),
-    });
-
-    log(`send_file: ${id} → ${routing.resolvedName} (${filename})`);
-    return ok(`File sent to ${routing.resolvedName} (id: ${id}, filename: ${filename})`);
-  },
-};
-
 export const editMessage: McpToolDefinition = {
   tool: {
     name: 'edit_message',
@@ -279,4 +232,4 @@ export const addReaction: McpToolDefinition = {
   },
 };
 
-registerTools([sendMessage, sendFile, editMessage, addReaction]);
+registerTools([sendMessage, editMessage, addReaction]);

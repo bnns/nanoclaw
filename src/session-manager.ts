@@ -16,7 +16,6 @@ import path from 'path';
 
 import { deriveAttachmentName } from './attachment-naming.js';
 import { isSafeAttachmentName } from './attachment-safety.js';
-import type { OutboundFile } from './channels/adapter.js';
 import { DATA_DIR } from './config.js';
 import { getMessagingGroup } from './db/messaging-groups.js';
 import {
@@ -267,6 +266,25 @@ export function writeSessionMessage(
  *   4. `wx` flag on writeFileSync to refuse following a pre-existing symlink
  *      at the target file path or overwriting any existing file.
  */
+/**
+ * True when `<sessionDir>/<name>` is a real directory (created if missing)
+ * that resolves to exactly that path. The session dir is the container's
+ * writable /workspace, so the agent can swap `<name>` for a symlink to any
+ * host path; a realpath check against the swapped root would then pass.
+ */
+function isRealSessionSubdir(agentGroupId: string, sessionId: string, name: string): boolean {
+  const root = sessionDir(agentGroupId, sessionId);
+  const dir = path.join(root, name);
+  try {
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir);
+    const stat = fs.lstatSync(dir);
+    if (stat.isSymbolicLink() || !stat.isDirectory()) return false;
+    return fs.realpathSync(dir) === path.join(fs.realpathSync(root), name);
+  } catch {
+    return false;
+  }
+}
+
 function extractAttachmentFiles(
   agentGroupId: string,
   sessionId: string,
@@ -300,6 +318,14 @@ function extractAttachmentFiles(
         rawName,
         replacement: filename,
       });
+    }
+
+    // The container can also replace the inbox ROOT with a symlink. Every
+    // check below resolves through the root, so verify it first — before
+    // any mkdir, which would otherwise create directories at the link target.
+    if (!isRealSessionSubdir(agentGroupId, sessionId, 'inbox')) {
+      log.warn('Rejecting unsafe session inbox root', { messageId });
+      continue;
     }
 
     const inboxDir = path.join(sessionDir(agentGroupId, sessionId), 'inbox', messageId);
@@ -428,103 +454,6 @@ export function writeSystemResponse(
       result,
     }),
   });
-}
-
-/**
- * Load outbox attachments for a delivered message.
- *
- * Symmetric with `extractAttachmentFiles` on the inbound side: the container
- * writes files into the session's `outbox/<messageId>/` directory alongside
- * its `messages_out` row, and the host reads them back at delivery time.
- *
- * Returns undefined when the outbox dir is missing or no declared file was
- * actually on disk — delivery continues without attachments rather than
- * failing the whole message.
- */
-export function readOutboxFiles(
-  agentGroupId: string,
-  sessionId: string,
-  messageId: string,
-  filenames: string[],
-): OutboundFile[] | undefined {
-  if (!isSafeAttachmentName(messageId)) {
-    log.warn('Rejecting unsafe outbox message id', { messageId });
-    return undefined;
-  }
-
-  const outboxDir = path.join(sessionDir(agentGroupId, sessionId), 'outbox', messageId);
-  if (!fs.existsSync(outboxDir)) return undefined;
-
-  let realOutboxDir: string;
-  try {
-    const stat = fs.lstatSync(outboxDir);
-    if (!stat.isDirectory() || stat.isSymbolicLink()) {
-      log.warn('Rejecting unsafe outbox directory', { messageId, outboxDir });
-      return undefined;
-    }
-    realOutboxDir = fs.realpathSync(outboxDir);
-  } catch (err) {
-    log.warn('Failed to inspect outbox directory', { messageId, err });
-    return undefined;
-  }
-
-  const files: OutboundFile[] = [];
-  for (const filename of filenames) {
-    if (!isSafeAttachmentName(filename)) {
-      log.warn('Refused unsafe outbox filename, would escape outbox', { messageId, filename });
-      continue;
-    }
-
-    const filePath = path.join(outboxDir, filename);
-    try {
-      const stat = fs.lstatSync(filePath);
-      if (!stat.isFile() || stat.isSymbolicLink()) {
-        log.warn('Rejecting unsafe outbox file', { messageId, filename });
-        continue;
-      }
-      const realFilePath = fs.realpathSync(filePath);
-      if (!isPathInside(realOutboxDir, realFilePath)) {
-        log.warn('Rejecting outbox file outside message directory', { messageId, filename });
-        continue;
-      }
-      files.push({ filename, data: fs.readFileSync(realFilePath) });
-    } catch {
-      log.warn('Outbox file not found', { messageId, filename });
-    }
-  }
-  return files.length > 0 ? files : undefined;
-}
-
-/**
- * Remove a message's outbox directory after successful delivery. Best-effort:
- * failures log and swallow. A cleanup failure must NOT propagate to the
- * delivery caller — the message is already on the user's screen, and a
- * thrown error would trigger the delivery retry path and deliver twice.
- */
-export function clearOutbox(agentGroupId: string, sessionId: string, messageId: string): void {
-  if (!isSafeAttachmentName(messageId)) {
-    log.warn('Rejecting unsafe outbox cleanup message id', { messageId });
-    return;
-  }
-
-  const outboxDir = path.join(sessionDir(agentGroupId, sessionId), 'outbox', messageId);
-  if (!fs.existsSync(outboxDir)) return;
-  try {
-    const stat = fs.lstatSync(outboxDir);
-    if (!stat.isDirectory() || stat.isSymbolicLink()) {
-      log.warn('Rejecting unsafe outbox cleanup directory', { messageId, outboxDir });
-      return;
-    }
-    const realOutboxBase = fs.realpathSync(path.join(sessionDir(agentGroupId, sessionId), 'outbox'));
-    const realOutboxDir = fs.realpathSync(outboxDir);
-    if (!isPathInside(realOutboxBase, realOutboxDir)) {
-      log.warn('Rejecting outbox cleanup outside session outbox', { messageId, outboxDir });
-      return;
-    }
-    fs.rmSync(realOutboxDir, { recursive: true, force: true });
-  } catch (err) {
-    log.warn('Outbox cleanup failed (message already delivered)', { messageId, err });
-  }
 }
 
 /** Mark a container as running for a session. */

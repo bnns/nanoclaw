@@ -25,8 +25,6 @@ import {
   sessionDir,
   inboundDbPath,
   outboundDbPath,
-  readOutboxFiles,
-  clearOutbox,
 } from './session-manager.js';
 import { getSession, findSession } from './db/sessions.js';
 import type { InboundEvent } from './channels/adapter.js';
@@ -112,56 +110,29 @@ describe('session manager', () => {
     outDb.close();
   });
 
-  it('should reject outbound attachment filenames that escape the message outbox', () => {
+  it('should reject inbound attachment writes when the inbox root itself is a symlink', () => {
     initSessionFolder('ag-1', 'sess-test');
-    const dir = sessionDir('ag-1', 'sess-test');
-    const msgOutbox = path.join(dir, 'outbox', 'msg-1');
-    fs.mkdirSync(msgOutbox, { recursive: true });
+    const { session } = resolveSession('ag-1', 'mg-1', null, 'shared');
 
-    const outside = path.join(TEST_DIR, 'outside.txt');
-    fs.writeFileSync(outside, 'outside secret');
+    // The container can replace the whole inbox/ root with a symlink. A
+    // realpath containment check against the swapped root would pass.
+    const inboxRoot = path.join(sessionDir('ag-1', session.id), 'inbox');
+    fs.rmSync(inboxRoot, { recursive: true, force: true });
+    const evilRoot = path.join(TEST_DIR, 'evil-root');
+    fs.mkdirSync(evilRoot, { recursive: true });
+    fs.symlinkSync(evilRoot, inboxRoot);
 
-    expect(readOutboxFiles('ag-1', 'sess-test', 'msg-1', ['../../../../../outside.txt'])).toBeUndefined();
-  });
+    writeSessionMessage('ag-1', session.id, {
+      id: 'msg-root',
+      kind: 'chat',
+      timestamp: now(),
+      content: JSON.stringify({
+        text: 'evil',
+        attachments: [{ name: 'photo.png', data: Buffer.from('PNGBYTES').toString('base64'), size: 8 }],
+      }),
+    });
 
-  it('should reject outbound attachment symlinks that escape the message outbox', () => {
-    initSessionFolder('ag-1', 'sess-test');
-    const dir = sessionDir('ag-1', 'sess-test');
-    const msgOutbox = path.join(dir, 'outbox', 'msg-1');
-    fs.mkdirSync(msgOutbox, { recursive: true });
-
-    const outside = path.join(TEST_DIR, 'outside.txt');
-    fs.writeFileSync(outside, 'outside secret');
-    fs.symlinkSync('../../../../../outside.txt', path.join(msgOutbox, 'safe-name.txt'));
-
-    expect(readOutboxFiles('ag-1', 'sess-test', 'msg-1', ['safe-name.txt'])).toBeUndefined();
-  });
-
-  it('should not recursively delete outside the outbox for unsafe message ids', () => {
-    initSessionFolder('ag-1', 'sess-test');
-    const victimDir = path.join(TEST_DIR, 'victim-dir');
-    fs.mkdirSync(victimDir, { recursive: true });
-    fs.writeFileSync(path.join(victimDir, 'keep.txt'), 'do not delete');
-
-    clearOutbox('ag-1', 'sess-test', '../../../../victim-dir');
-
-    expect(fs.existsSync(path.join(victimDir, 'keep.txt'))).toBe(true);
-  });
-
-  it('should still read and clear normal basename outbox files', () => {
-    initSessionFolder('ag-1', 'sess-test');
-    const dir = sessionDir('ag-1', 'sess-test');
-    const msgOutbox = path.join(dir, 'outbox', 'msg-1');
-    fs.mkdirSync(msgOutbox, { recursive: true });
-    fs.writeFileSync(path.join(msgOutbox, 'result.txt'), 'ok');
-
-    const files = readOutboxFiles('ag-1', 'sess-test', 'msg-1', ['result.txt']);
-    expect(files).toHaveLength(1);
-    expect(files?.[0]?.filename).toBe('result.txt');
-    expect(files?.[0]?.data.toString()).toBe('ok');
-
-    clearOutbox('ag-1', 'sess-test', 'msg-1');
-    expect(fs.existsSync(msgOutbox)).toBe(false);
+    expect(fs.existsSync(path.join(evilRoot, 'msg-root'))).toBe(false);
   });
 
   it('should reject inbound attachment writes through a pre-placed symlinked inbox dir', () => {

@@ -415,8 +415,7 @@ describe('routeAgentMessage return-path', () => {
     expect(s1Rows.length + s2Rows.length).toBe(20);
   });
 
-  it('file forwarding: copies bytes from source outbox to target inbox', async () => {
-    // Place a file in S1's outbox for the message.
+  it('file forwarding is disabled: text is routed, outbox files are not copied', async () => {
     const outboxDir = path.join(sessionDir(A, S1.id), 'outbox', 'msg-with-file');
     fs.mkdirSync(outboxDir, { recursive: true });
     fs.writeFileSync(path.join(outboxDir, 'report.pdf'), 'fake-pdf-bytes');
@@ -434,13 +433,8 @@ describe('routeAgentMessage return-path', () => {
     const bRows = readInbound(B, SB.id);
     expect(bRows).toHaveLength(1);
     const parsed = JSON.parse(bRows[0].content);
-    expect(parsed.attachments).toHaveLength(1);
-    expect(parsed.attachments[0].name).toBe('report.pdf');
-    expect(parsed.attachments[0].type).toBe('file');
-
-    // Verify actual file bytes were copied to the target inbox.
-    const targetPath = path.join(sessionDir(B, SB.id), parsed.attachments[0].localPath);
-    expect(fs.existsSync(targetPath)).toBe(true);
-    expect(fs.readFileSync(targetPath, 'utf-8')).toBe('fake-pdf-bytes');
+    expect(parsed.text).toBe('see attached');
+    expect(parsed.attachments ?? []).toHaveLength(0);
+    expect(fs.existsSync(path.join(sessionDir(B, SB.id), 'inbox', 'msg-with-file'))).toBe(false);
   });
 });

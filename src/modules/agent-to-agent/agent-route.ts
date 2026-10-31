@@ -18,8 +18,6 @@
  * `channel_type === 'agent'` check. When the module is absent the check in
  * core throws with a "module not installed" message so retry → mark failed.
  */
-import fs from 'fs';
-import path from 'path';
 
 import { isSafeAttachmentName } from '../../attachment-safety.js';
 import { getAgentGroup } from '../../db/agent-groups.js';
@@ -27,7 +25,7 @@ import { getInboundSourceSessionId, getMostRecentPeerSourceSessionId } from '../
 import { getSession } from '../../db/sessions.js';
 import { wakeContainer } from '../../container-runner.js';
 import { log } from '../../log.js';
-import { openInboundDb, resolveSession, sessionDir, writeSessionMessage } from '../../session-manager.js';
+import { openInboundDb, resolveSession, writeSessionMessage } from '../../session-manager.js';
 import type { Session } from '../../types.js';
 import { hasDestination } from './db/agent-destinations.js';
 
@@ -41,7 +39,7 @@ export interface ForwardedAttachment {
 }
 
 /**
- * Copy file attachments from the source agent's outbox into the target
+ * DISABLED in this deployment (always returns []). Was: copy file attachments from the source agent's outbox into the target
  * agent's inbox. Returns attachments using the formatter's existing
  * `{name, type, localPath}` convention — target agent reads `localPath`
  * as relative to `/workspace/`, matching how channel-inbound attachments
@@ -53,49 +51,15 @@ export interface ForwardedAttachment {
  */
 export function forwardAttachedFiles(
   source: { agentGroupId: string; sessionId: string; messageId: string; filenames: string[] },
-  target: { agentGroupId: string; sessionId: string; messageId: string },
+  _target: { agentGroupId: string; sessionId: string; messageId: string },
 ): ForwardedAttachment[] {
-  if (source.filenames.length === 0) return [];
-
-  const sourceDir = path.join(sessionDir(source.agentGroupId, source.sessionId), 'outbox', source.messageId);
-  if (!fs.existsSync(sourceDir)) {
-    log.warn('agent-route: source outbox dir missing, no files forwarded', {
-      sourceMsgId: source.messageId,
-      sourceDir,
-    });
-    return [];
+  // Outbox file transfer is disabled in this deployment: the outbox lives in
+  // the container-writable session dir, so copying from it lets an agent
+  // point the host at arbitrary host files via a symlinked outbox/.
+  if (source.filenames.length > 0) {
+    log.warn('agent-route: file forwarding is disabled; text only', { sourceMsgId: source.messageId });
   }
-
-  const targetInboxDir = path.join(sessionDir(target.agentGroupId, target.sessionId), 'inbox', target.messageId);
-  fs.mkdirSync(targetInboxDir, { recursive: true });
-
-  const attachments: ForwardedAttachment[] = [];
-  for (const filename of source.filenames) {
-    if (!isSafeAttachmentName(filename)) {
-      log.warn('agent-route: rejecting unsafe attachment filename (path traversal attempt?)', {
-        sourceMsgId: source.messageId,
-        filename,
-      });
-      continue;
-    }
-    const src = path.join(sourceDir, filename);
-    if (!fs.existsSync(src)) {
-      log.warn('agent-route: referenced file missing in source outbox, skipped', {
-        sourceMsgId: source.messageId,
-        filename,
-      });
-      continue;
-    }
-    const dst = path.join(targetInboxDir, filename);
-    fs.copyFileSync(src, dst);
-    attachments.push({
-      name: filename,
-      filename,
-      type: 'file',
-      localPath: `inbox/${target.messageId}/${filename}`,
-    });
-  }
-  return attachments;
+  return [];
 }
 
 export interface RoutableAgentMessage {

@@ -22,7 +22,7 @@ import {
 } from './db/session-db.js';
 import { log } from './log.js';
 import { normalizeOptions } from './channels/ask-question.js';
-import { clearOutbox, openInboundDb, openOutboundDb, readOutboxFiles } from './session-manager.js';
+import { openInboundDb, openOutboundDb } from './session-manager.js';
 import { pauseTypingRefreshAfterDelivery, setTypingAdapter } from './modules/typing/index.js';
 import type { OutboundFile } from './channels/adapter.js';
 import type { Session } from './types.js';
@@ -353,13 +353,14 @@ async function deliverMessage(
     return;
   }
 
-  // Read file attachments from outbox if the content declares files.
-  // File I/O lives in session-manager.ts (symmetric with inbound
-  // extractAttachmentFiles) — delivery just hands buffers to the adapter.
-  const files =
-    Array.isArray(content.files) && content.files.length > 0
-      ? readOutboxFiles(session.agent_group_id, session.id, msg.id, content.files as string[])
-      : undefined;
+  // File attachments are disabled in this deployment. The outbox lives in the
+  // container-writable session dir, so reading it (and rm -rf'ing it after
+  // delivery) let a prompt-injected agent swap outbox/ for a symlink and make
+  // the host post or delete arbitrary host files. Botdanov sends files via
+  // host-api instead, so the host never touches the outbox.
+  if (Array.isArray(content.files) && content.files.length > 0) {
+    log.warn('Outbound file attachments are disabled; sending text only', { id: msg.id });
+  }
 
   const platformMsgId = await deliveryAdapter.deliver(
     msg.channel_type,
@@ -367,17 +368,13 @@ async function deliverMessage(
     msg.thread_id,
     msg.kind,
     msg.content,
-    files,
   );
   log.info('Message delivered', {
     id: msg.id,
     channelType: msg.channel_type,
     platformId: msg.platform_id,
     platformMsgId,
-    fileCount: files?.length,
   });
-
-  clearOutbox(session.agent_group_id, session.id, msg.id);
 
   return platformMsgId;
 }
